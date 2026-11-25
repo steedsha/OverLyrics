@@ -1,0 +1,73 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/oly-contracts",
+    "crates/oly-core",
+    "crates/oly-engine",
+    "crates/oly-platform-win",
+    "crates/oly-render",
+    "crates/oly-gpui-app",
+    "crates/oly-qa",
+]
+
+[workspace.package]
+edition = "2024"
+version = "1.0.0"
+license = "AGPL-3.0-only"
+publish = false
+rust-version = "1.90"
+
+[workspace.dependencies]
+anyhow = "1"
+env_logger = "0.11"
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+
+# GPUI Kit is the only GPUI entry point. The exact upstream snapshot is pinned
+# by the Kit release itself (gpui-pre / gpui-pre-platform / gpui-pre-macros at
+# =0.3.12); we never depend on those crates directly so a second copy of the
+# GPUI types can never enter the graph.
+gpui-kit = { version = "0.9.1", default-features = false, features = [
+    "component",
+    "assets",
+] }
+
+oly-contracts = { path = "crates/oly-contracts" }
+oly-core = { path = "crates/oly-core" }
+oly-engine = { path = "crates/oly-engine" }
+oly-platform-win = { path = "crates/oly-platform-win" }
+oly-render = { path = "crates/oly-render" }
+
+# GPUI test executables otherwise duplicate full dependency PDBs across many
+# feature variants. Keep line tables for our code, omit dependency debug types,
+# and avoid unbounded incremental caches. Release rendering is unchanged.
+[profile.dev]
+debug = "line-tables-only"
+incremental = false
+
+[profile.dev.package."*"]
+debug = 0
+
+[profile.test]
+debug = "line-tables-only"
+incremental = false
+
+[profile.test.package."*"]
+debug = 0
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+debug = false
+
+# Both GPUI crates are vendored so the Windows renderer can be extended with a
+# custom surface primitive. The patch redirects every consumer (gpui-kit,
+# gpui-pre-platform, gpui-pre-windows itself) onto the same path crates, so the
+# graph still contains exactly one copy of the GPUI types.
+[patch.crates-io]
+gpui-pre = { path = "vendor/gpui-pre" }
+gpui-pre-windows = { path = "vendor/gpui-pre-windows" }

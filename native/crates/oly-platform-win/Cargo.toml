@@ -1,0 +1,54 @@
+[package]
+name = "oly-platform-win"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+log.workspace = true
+oly-contracts.workspace = true
+oly-core.workspace = true
+oly-engine.workspace = true
+reqwest = { version = "=0.12.28", default-features = false, features = ["blocking", "rustls-tls-native-roots", "gzip", "deflate", "system-proxy"] }
+serde.workspace = true
+serde_json.workspace = true
+# The decoder publishes colour facts as `oly_render::video` types so the render
+# pass and the decoder can never disagree on the enum shape.
+oly-render.workspace = true
+
+# Media Foundation decoder + SMTC bridge + per-app volume.
+#
+# The GPU interop features (Direct3D 11, DXGI) are needed to walk
+# `IMFDXGIDeviceManager` -> `ID3D11Device` and to copy decoded NV12 frames onto
+# the render device. `Win32_Media_MediaFoundation` is the source-reader API
+# surface itself; StructuredStorage carries PROPVARIANT for seek positions and
+# presentation attributes.
+#
+# The WinRT side (`Media_Control` for the session manager, `Storage_Streams` for
+# cover thumbnails, `Foundation` for `IAsyncOperation`/`TypedEventHandler`) sits
+# in the same crate list, as does Core Audio (`Win32_Media_Audio`) and the
+# packaging API that maps an audio session's process back to its AUMID.
+[target.'cfg(target_os = "windows")'.dependencies.windows]
+version = "0.62"
+features = [
+    "Foundation",
+    "Foundation_Collections",
+    "Media",
+    "Media_Control",
+    "Storage_Streams",
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Media_Audio",
+    "Win32_Media_MediaFoundation",
+    "Win32_Storage_Packaging_Appx",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_UI_Controls_Dialogs",
+]

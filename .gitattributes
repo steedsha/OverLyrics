@@ -1,0 +1,12 @@
+# Frozen evidence must round-trip byte-for-byte: the exporter records SHA-256 for
+# every fixture, so any end-of-line conversion would invalidate manifest.json on
+# a fresh checkout.
+native/tests/fixtures/** -text
+# Vendored upstream sources are a fork of crates.io tarballs. Byte-identity with
+# upstream is what makes `diff -r <upstream> native/vendor/...` a reviewable
+# patch, so never let Git rewrite their line endings.
+native/vendor/** -text
+*.ps1 text eol=crlf
+*.mjs text eol=lf
+*.ts  text eol=lf
+*.rs  text eol=lf

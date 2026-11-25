@@ -1,0 +1,46 @@
+[package]
+name = "oly-gpui-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+# Keep an explicit binary name so release and dev artifacts are always `overlyrics.exe`.
+[[bin]]
+name = "overlyrics"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+env_logger.workspace = true
+log.workspace = true
+gpui-kit.workspace = true
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp", "gif"] }
+serde.workspace = true
+serde_json.workspace = true
+oly-contracts.workspace = true
+oly-core.workspace = true
+oly-engine.workspace = true
+base64 = "0.22"
+oly-render.workspace = true
+oly-platform-win.workspace = true
+
+# The glass panels and the present-cadence probe own D3D11 objects directly,
+# for the same reason `oly-render`'s background pass does: a live-window
+# snapshot has to be copied and filtered on the window's own device.
+[target.'cfg(target_os = "windows")'.dependencies.windows]
+version = "0.62"
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_System_Performance",
+]
+
+[features]
+qa-capture = ["gpui-kit/test-support", "oly-render/qa-capture"]
+
+[target.'cfg(target_os = "windows")'.build-dependencies]
+embed-resource = "3"

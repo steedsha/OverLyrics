@@ -1,0 +1,7 @@
+# The experiment pins its own toolchain so it never shifts the legacy Tauri
+# project's MSRV or the machine-wide default. `stable` resolves to the
+# toolchain installed on this host; the exact resolved version is recorded in
+# docs/gpui/UPSTREAM.md (rustc 1.100.0, 2026-11-09); check with `rustc --version`.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]

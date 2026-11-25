@@ -1,0 +1,50 @@
+[package]
+name = "oly-render"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+log.workspace = true
+gpui-kit.workspace = true
+# `oly_core::cache` owns the one temporary-bitmap ledger every image pipeline
+# reports into; a second accounting scheme would let a leak hide between them.
+oly-core.workspace = true
+oly-contracts.workspace = true
+unicode-segmentation = "1"
+
+# The background pass owns D3D11 objects directly: four RGBA16F render targets
+# and a ping-pong chain cannot be expressed through the custom-surface channel,
+# which only uploads RGBA8 and has no render-target binding.
+[target.'cfg(target_os = "windows")'.dependencies.windows]
+version = "0.62"
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Direct3D_Fxc",
+    "Win32_Graphics_Dxgi_Common",
+]
+
+[features]
+# Enables the QA-only frame capture path. Off in the shipped binary so the
+# render loop never performs a GPU readback or a stall.
+qa-capture = ["gpui-kit/test-support"]
+
+# The interop test owns a real window and a real GPU, so it runs as a plain
+# binary: libtest would swallow the window's message loop and the readback
+# would race the compositor.
+[[test]]
+name = "gpu_interop"
+path = "tests/gpu_interop.rs"
+harness = false
+required-features = ["qa-capture"]
+
+[dev-dependencies]
+env_logger.workspace = true
+image = "0.25"
+oly-core.workspace = true
+serde_json.workspace = true
+sha2.workspace = true

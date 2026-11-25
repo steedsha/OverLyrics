@@ -1,0 +1,14 @@
+target/
+.target/
+*.log
+*.tmp
+.tmp/
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+tmp-*/
+tmp-*.ps1
+tmp-*.py
+tmp-*.mjs
+tmp-*.png
