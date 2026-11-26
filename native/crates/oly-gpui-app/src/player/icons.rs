@@ -25,6 +25,17 @@ pub enum Icon {
     CoverExpand,
     CoverCollapse,
     MusicNote,
+    Pin,
+    PinFilled,
+    DesktopLyrics,
+    Lock,
+    Unlock,
+    OrientH,
+    OrientV,
+    TranslateOn,
+    TranslateOff,
+    FontSize,
+    Palette,
 }
 pub fn paint(window: &mut Window, cx: &App, icon: Icon, r: Box4, color: Hsla) {
     paint_transformed(window, cx, icon, r, color, TransformationMatrix::unit());
@@ -125,6 +136,50 @@ fn paint_transformed(
         Icon::MusicNote => (
             "legacy/music_note.svg",
             include_bytes!("../../assets/icons/music_note.svg"),
+        ),
+        Icon::Pin => (
+            "legacy/pin.svg",
+            include_bytes!("../../assets/icons/pin.svg"),
+        ),
+        Icon::PinFilled => (
+            "legacy/pin_filled.svg",
+            include_bytes!("../../assets/icons/pin_filled.svg"),
+        ),
+        Icon::DesktopLyrics => (
+            "legacy/desktop_lyrics.svg",
+            include_bytes!("../../assets/icons/desktop_lyrics.svg"),
+        ),
+        Icon::Lock => (
+            "legacy/lock.svg",
+            include_bytes!("../../assets/icons/lock.svg"),
+        ),
+        Icon::Unlock => (
+            "legacy/unlock.svg",
+            include_bytes!("../../assets/icons/unlock.svg"),
+        ),
+        Icon::OrientH => (
+            "legacy/orient_h.svg",
+            include_bytes!("../../assets/icons/orient_h.svg"),
+        ),
+        Icon::OrientV => (
+            "legacy/orient_v.svg",
+            include_bytes!("../../assets/icons/orient_v.svg"),
+        ),
+        Icon::TranslateOn => (
+            "legacy/translate_on.svg",
+            include_bytes!("../../assets/icons/translate_on.svg"),
+        ),
+        Icon::TranslateOff => (
+            "legacy/translate_off.svg",
+            include_bytes!("../../assets/icons/translate_off.svg"),
+        ),
+        Icon::FontSize => (
+            "legacy/font_size.svg",
+            include_bytes!("../../assets/icons/font_size.svg"),
+        ),
+        Icon::Palette => (
+            "legacy/palette.svg",
+            include_bytes!("../../assets/icons/palette.svg"),
         ),
     };
     if let Err(error) = window.paint_svg(

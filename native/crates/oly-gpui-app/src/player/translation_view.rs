@@ -63,7 +63,8 @@ impl PlayerView {
                 live.search.clear_cache();
                 live.candidates.clear();
                 self.picked = usize::MAX;
-                self.picker_start = 0;
+                self.picker_scroll_spring.set_position(0.0);
+                self.picker_scroll_spring.set_target_position(0.0);
                 if let Some(track) = live.track.clone() {
                     live.search.request(live.model.generation(), track, None);
                     live.status = "搜索歌词中".into();

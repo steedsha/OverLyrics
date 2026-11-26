@@ -129,16 +129,32 @@ mod imp {
                 return false;
             };
             let matched = process_name(handle).is_some_and(|name| same_app(&name, app))
-                || aumid(handle).is_some_and(|id| id.eq_ignore_ascii_case(app));
+                || aumid(handle).is_some_and(|id| same_aumid(&id, app));
             let _ = CloseHandle(handle);
             matched
         }
     }
 
+    /// Two packaged-app AUMIDs belong to the same Store app when their
+    /// Package Family Name (the prefix before `!`) matches. Apple Music's
+    /// audio playback can run in a sibling process (`AMPLibraryAgent.exe`)
+    /// under the same package family as the SMTC session (`!App`).
+    fn same_aumid(proc_aumid: &str, app: &str) -> bool {
+        if proc_aumid.eq_ignore_ascii_case(app) {
+            return true;
+        }
+        match (proc_aumid.split_once('!'), app.split_once('!')) {
+            (Some((pf_proc, _)), Some((pf_app, _))) => {
+                !pf_proc.is_empty() && pf_proc.eq_ignore_ascii_case(pf_app)
+            }
+            _ => false,
+        }
+    }
+
     /// SMTC names a browser session `MSEdge` while the process is `msedge.exe`,
     /// so a literal comparison would silently lose every volume drag for the
-    /// most common case there is — a song playing in a browser tab. The `.exe`
-    /// suffix is the only difference allowed.
+    /// most common case there is — a song playing in a browser tab. Packaged
+    /// Apple Music can also output audio through `AMPLibraryAgent.exe`.
     fn same_app(process_name: &str, app: &str) -> bool {
         fn stem(name: &str) -> &str {
             name.strip_suffix(".exe")
@@ -152,7 +168,11 @@ mod imp {
         }
         let low_app = app.to_ascii_lowercase();
         let proc_stem = stem(process_name).to_ascii_lowercase();
-        (low_app.starts_with("appleinc.applemusicwin_") && proc_stem == "applemusic")
+        let is_apple_app = low_app.starts_with("appleinc.applemusicwin_")
+            || low_app.contains("applemusic")
+            || low_app.contains("amplibraryagent");
+        let is_apple_proc = proc_stem == "applemusic" || proc_stem == "amplibraryagent";
+        (is_apple_app && is_apple_proc)
             || (low_app.starts_with("spotifyab.spotifymusic_") && proc_stem == "spotify")
     }
 
@@ -192,7 +212,7 @@ mod imp {
 
     #[cfg(test)]
     mod tests {
-        use super::same_app;
+        use super::{same_app, same_aumid};
 
         #[test]
         fn browser_aumids_match_their_process_name() {
@@ -200,6 +220,23 @@ mod imp {
             assert!(same_app("MSEdge", "msedge.exe"));
             assert!(same_app("QQMusic.exe", "QQMusic.exe"));
             assert!(same_app("Spotify.exe", "spotify"));
+        }
+
+        #[test]
+        fn apple_music_matches_sibling_audio_agent_and_package_family() {
+            assert!(same_app(
+                "AMPLibraryAgent.exe",
+                "AppleInc.AppleMusicWin_nzyj5cx40ttqa!App"
+            ));
+            assert!(same_app("AMPLibraryAgent.exe", "AppleMusic.exe"));
+            assert!(same_aumid(
+                "AppleInc.AppleMusicWin_nzyj5cx40ttqa!AMPLibraryAgent",
+                "AppleInc.AppleMusicWin_nzyj5cx40ttqa!App"
+            ));
+            assert!(!same_aumid(
+                "OtherApp_123!App",
+                "AppleInc.AppleMusicWin_nzyj5cx40ttqa!App"
+            ));
         }
 
         #[test]

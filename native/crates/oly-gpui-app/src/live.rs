@@ -1168,6 +1168,8 @@ impl LiveSession {
             config.clone(),
         );
         oly_platform_win::smtc::volume::player::init(resolve_player_volume_script(root.as_path()));
+        crate::updater::cleanup_old_binary();
+        crate::updater::global().start_silent_check_once();
         let inbox = Arc::new(Mutex::new(crate::commands::Inbox::default()));
         let host = crate::commands::ShellHost::start(Arc::new(crate::commands::ShellSink::new(
             inbox.clone(),

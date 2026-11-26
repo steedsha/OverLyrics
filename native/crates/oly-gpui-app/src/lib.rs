@@ -8,3 +8,4 @@ pub mod player;
 pub mod ui;
 
 pub mod live;
+pub mod updater;

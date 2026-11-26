@@ -232,12 +232,19 @@ fn smoothstep_f64(edge0: f64, edge1: f64, x: f64) -> f64 {
     t * t * (3.0 - 2.0 * t)
 }
 
-/// Smooth 0..1 weight for warm brown / tan / sepia / ochre tones
-/// (OKLCH hue ~30..98 deg, low-to-medium chroma) which look muddy/dark
+/// Smooth 0..1 weight for the yellow / cream / olive-mud hue band (OKLCH ~52..120 deg)
+/// where darkening bright low-chroma cream/ivory while boosting chroma turns clean
+/// warm-white into murky olive-brown / mustard-ochre.
+fn yellow_olive_mud(h_deg: f64) -> f64 {
+    smoothstep_f64(52.0, 68.0, h_deg) * (1.0 - smoothstep_f64(104.0, 120.0, h_deg))
+}
+
+/// Smooth 0..1 weight for warm terracotta / tan / brown tones
+/// (OKLCH hue ~25..94 deg, narrowed off the olive-yellow tail) which look muddy/dark
 /// when darkened to the same Oklab L as saturated hues.
 fn warm_earth_factor(h_deg: f64, c: f64) -> f64 {
-    let h_in = smoothstep_f64(25.0, 42.0, h_deg) * (1.0 - smoothstep_f64(88.0, 105.0, h_deg));
-    let c_in = smoothstep_f64(0.010, 0.022, c) * (1.0 - smoothstep_f64(0.075, 0.115, c));
+    let h_in = smoothstep_f64(25.0, 40.0, h_deg) * (1.0 - smoothstep_f64(78.0, 94.0, h_deg));
+    let c_in = smoothstep_f64(0.015, 0.030, c) * (1.0 - smoothstep_f64(0.080, 0.120, c));
     h_in * c_in
 }
 
@@ -259,10 +266,9 @@ fn oklch_tone_map(pixels: &mut [u8], chroma_boost: f64, hue_lift: f64) {
     }
 
     let mean_l = l_sum / n as f64;
-    // Dark warm browns (e.g. Preacher's Daughter / Willoughby Tucker, mean_l ~ 0.30-0.35)
-    // should stay deep and moody; lighter tan/beige covers (e.g. Stick Season, mean_l ~ 0.65)
-    // keep the full Candidate A warm lift.
-    let we_tone_scale = 0.28 + 0.72 * smoothstep_f64(0.32, 0.56, mean_l);
+    // Dark warm browns (e.g. Preacher's Daughter / Nettles, mean_l ~ 0.30-0.35)
+    // stay deep and moody; lighter tan/terracotta covers keep their warm lift.
+    let we_tone_scale = 0.25 + 0.75 * smoothstep_f64(0.32, 0.56, mean_l);
     for (i, &[l, a, b]) in labs.iter().enumerate() {
         let c = (a * a + b * b).sqrt();
         let h = b.atan2(a);
@@ -272,23 +278,33 @@ fn oklch_tone_map(pixels: &mut [u8], chroma_boost: f64, hue_lift: f64) {
         let high_c_taper = 1.0 - smoothstep_f64(0.10, 0.19, c);
         let taper_scale = 0.20 + 0.80 * high_c_taper;
         let eff_boost = 1.0 + (chroma_boost - 1.0) * chroma_gate * taper_scale;
-        let we_lift = warm_earth_factor(h_deg, c) * 0.065 * we_tone_scale;
+
+        // Detect bright cream/ivory/off-white pixels in the yellow-olive danger zone
+        // so darkening them yields clean warm-charcoal/taupe instead of olive-mustard.
+        let mud_h = yellow_olive_mud(h_deg);
+        let mud_cream =
+            mud_h * smoothstep_f64(0.60, 0.78, l) * (1.0 - smoothstep_f64(0.055, 0.105, c));
+        let we_lift =
+            warm_earth_factor(h_deg, c) * (1.0 - 0.85 * mud_cream) * 0.055 * we_tone_scale;
 
         let (l_new, c_new) = if mean_l > 0.60 {
-            let scale_l = 0.42 / mean_l.max(1e-4);
-            let ln = (l * (0.40 + 0.60 * scale_l) + we_lift).clamp(0.16, 0.50 + we_lift * 1.1);
-            // Compensate chroma when darkening bright pastel/sky colours so
-            // sky-blue / mint covers stay luminous instead of turning grey.
-            let bright_comp = 1.0 + ((l - 0.55) / 0.35).clamp(0.0, 1.0) * 0.75 * chroma_gate;
+            let scale_l = 0.40 / mean_l.max(1e-4);
+            let ln = (l * (0.40 + 0.60 * scale_l) + we_lift).clamp(0.15, 0.48 + we_lift * 1.1);
+            // Compensate chroma when darkening bright pastel/sky colours, but gate out
+            // low-to-mid-chroma yellow/cream so ivory walls never turn mustard-olive.
+            let mud_comp_mask = 1.0 - mud_h * (1.0 - smoothstep_f64(0.07, 0.12, c));
+            let bright_comp =
+                1.0 + ((l - 0.55) / 0.35).clamp(0.0, 1.0) * 0.75 * chroma_gate * mud_comp_mask;
             let cn = c
-                * (1.0 + (chroma_boost * 1.25 * bright_comp - 1.0) * chroma_gate * taper_scale);
+                * (1.0 + (chroma_boost * 1.25 * bright_comp - 1.0) * chroma_gate * taper_scale)
+                * (1.0 - 0.52 * mud_cream);
             (ln, cn)
         } else if mean_l < 0.32 {
             let ln = (l.max(hue_lift) * 1.18 + 0.04 + we_lift).clamp(0.14, 0.65);
             (ln, c * eff_boost)
         } else {
-            let ln = (l * 0.88 + we_lift).clamp(0.16, 0.58 + we_lift);
-            (ln, c * eff_boost)
+            let ln = (l * 0.88 + we_lift).clamp(0.15, 0.56 + we_lift);
+            (ln, c * eff_boost * (1.0 - 0.30 * mud_cream))
         };
 
         let c_clamped = c_new.min(0.24);
@@ -349,10 +365,10 @@ fn blend_palette_flow(pixels: &mut [u8], sample_rgba: &[u8]) -> f32 {
     let var_b = (rgb_sq_sum[2] / inf - (rgb_sum[2] / inf).powi(2)).max(0.0);
     let spatial_std = ((var_r + var_g + var_b) / 3.0).sqrt();
 
-    // Continuous black/white proportion on the 32x32 sample:
+    // Continuous black/white/bright-paper proportion on the 32x32 sample:
     // - Covers with lots of pure black smoothly mix deeper black into shadow/base lobes.
-    // - Covers with lots of pure white smoothly mix calm neutral grey into base lobes
-    //   to avoid overexposure without switching into a separate mode.
+    // - Covers with lots of pure white OR warm cream/ivory paper walls smoothly mix calm
+    //   charcoal-grey with wide Chiaroscuro depth so they never turn into flat olive-mud.
     let black_ratio = labs
         .iter()
         .zip(&chromas)
@@ -365,8 +381,17 @@ fn blend_palette_flow(pixels: &mut [u8], sample_rgba: &[u8]) -> f32 {
         .filter(|&(lab, &c)| lab[0] > 0.85 && c < 0.035)
         .count() as f64
         / nf;
+    let paper_ratio: f64 = labs
+        .iter()
+        .zip(&chromas)
+        .map(|(lab, &c)| {
+            smoothstep_f64(0.74, 0.85, lab[0]) * (1.0 - smoothstep_f64(0.028, 0.062, c))
+        })
+        .sum::<f64>()
+        / nf;
     let black_mix = ((black_ratio - 0.35) / 0.45).clamp(0.0, 1.0);
     let white_mix = ((white_ratio - 0.35) / 0.45).clamp(0.0, 1.0);
+    let paper_mix = ((paper_ratio - 0.30) / 0.42).clamp(0.0, 1.0);
 
     // Top 5% mean chroma gates pure B&W covers while keeping white-bordered color accents.
     chromas.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
@@ -374,8 +399,11 @@ fn blend_palette_flow(pixels: &mut [u8], sample_rgba: &[u8]) -> f32 {
     let c_top5: f64 = chromas[..top_n].iter().sum::<f64>() / top_n as f64;
     let achromatic_scale = ((c_top5 - 0.015) / 0.025).clamp(0.0, 1.0);
 
-    // Deterministic weighted k-means (k = 4): seed via farthest-point from weighted mean.
+    // Deterministic chroma-weighted k-means (k = 4): seed via farthest-point from weighted mean.
+    // Weighting (da^2 + db^2) by CHROMA_W keeps small vivid subjects (e.g. denim blue,
+    // blush pink, golden butterfly) from being swallowed by lightness splits of bright walls.
     const K: usize = 4;
+    const CHROMA_W: f64 = 3.5;
     let w_total: f64 = weights.iter().sum();
     let mut centers = [[0.0f64; 3]; K];
     for (lab, &w) in labs.iter().zip(&weights) {
@@ -396,7 +424,7 @@ fn blend_palette_flow(pixels: &mut [u8], sample_rgba: &[u8]) -> f32 {
                     let dl = lab[0] - centers[j][0];
                     let da = lab[1] - centers[j][1];
                     let db = lab[2] - centers[j][2];
-                    dl * dl + da * da + db * db
+                    dl * dl + CHROMA_W * (da * da + db * db)
                 })
                 .fold(f64::INFINITY, f64::min);
             let score = min_d2 * w;
@@ -420,7 +448,7 @@ fn blend_palette_flow(pixels: &mut [u8], sample_rgba: &[u8]) -> f32 {
                 let dl = lab[0] - c[0];
                 let da = lab[1] - c[1];
                 let db = lab[2] - c[2];
-                let d2 = dl * dl + da * da + db * db;
+                let d2 = dl * dl + CHROMA_W * (da * da + db * db);
                 if d2 < best_d2 {
                     best_d2 = d2;
                     best_c = ci;
@@ -572,19 +600,23 @@ fn blend_palette_flow(pixels: &mut [u8], sample_rgba: &[u8]) -> f32 {
         [d_rad * 0.85, -d_rad * 0.50, d_rad * 0.35, -d_rad * 0.95]
     };
 
-    // Moderate bright-to-dark chroma compensation for bright pastel/sky primaries
-    // so they stay clear when darkened without overpowering the accent lobe.
-    let comp_gain = if white_mix < 0.20 { 0.85 } else { 0.55 };
+    // Hue-aware bright-to-dark chroma compensation: preserve luminous pastel/sky
+    // primaries when darkened, but do NOT amplify bright cream/beige/olive-yellow walls.
+    let pri_mud_gate =
+        yellow_olive_mud(pri_h_deg) * (1.0 - smoothstep_f64(0.055, 0.105, pri_c));
+    let comp_gain = (if white_mix < 0.20 { 0.85 } else { 0.55 }) * (1.0 - 0.90 * pri_mud_gate);
     let pri_chroma_comp = if pri_lab[0] > 0.58 && pri_c > 0.015 {
         1.0 + ((pri_lab[0] - 0.58) / 0.30).clamp(0.0, 1.0) * comp_gain
     } else {
         1.0
     };
 
-    // Dominant primary (>= 55% area, non-void) uses 3 : 1 lobe ratio so the main
-    // colour clearly leads (~65-75%) while the 1 accent lobe keeps full weight &
-    // radius inside the visible 16:9 band so it stays visibly present.
-    let dominant_primary = pri.area >= 0.55 && !is_extreme_void(&pri);
+    // Dominant primary (>= 55% area, non-void, non-light-paper-backdrop) uses 3 : 1
+    // lobe ratio. Bright cream/ivory walls release lobe 1 to Secondary so actual
+    // cover subjects carry real colour instead of being drowned out by the wall.
+    let is_light_backdrop = |cl: &ClusterInfo| cl.lab[0] > 0.76 && cl.c < 0.058;
+    let dominant_primary =
+        pri.area >= 0.55 && !is_extreme_void(&pri) && !is_light_backdrop(&pri);
     let lobe1_lab = if dominant_primary {
         let h1 = pri_h + 8.0f64.to_radians() * achromatic_scale;
         [pri_lab[0], pri_c * h1.cos(), pri_c * h1.sin()]
@@ -614,7 +646,7 @@ fn blend_palette_flow(pixels: &mut [u8], sample_rgba: &[u8]) -> f32 {
             lobe1_lab,
             0.62,
             0.10,
-            0.24,
+            0.22,
             0.46,
             if dominant_primary {
                 1.24 * pri_chroma_comp
@@ -640,34 +672,36 @@ fn blend_palette_flow(pixels: &mut [u8], sample_rgba: &[u8]) -> f32 {
         ),
         (
             pri_lab,
-            0.48 - 0.14 * mono,
-            0.05 - 0.02 * mono - lo_sub,
-            (0.11 - lo_sub).max(0.07),
-            0.34 - 0.10 * mono,
-            (1.15 + 0.08 * mono) * pri_chroma_comp,
-            0.02,
-            0.18,
+            0.42 - 0.12 * mono,
+            0.03 - 0.02 * mono - lo_sub,
+            (0.09 - lo_sub).max(0.06),
+            0.27 - 0.08 * mono,
+            (1.12 + 0.06 * mono) * pri_chroma_comp,
+            0.015,
+            0.17,
         ),
     ];
 
     // Lightness-adaptive warm-earth lift:
-    // - Light tan / beige covers (pri L >= 0.55) keep the full Candidate A lift.
-    // - Dark brown / sepia covers (pri L ~ 0.24..0.35) get a much subtler lift
-    //   with deeper shadows and slightly richer chroma so they stay moody, not pale.
-    let we = warm_earth_factor(pri_h_deg, pri_c);
+    // - Genuine tan/terracotta midtones keep warmth, while cream paper backdrops are
+    //   gated out and the deep shadow anchor (lobe 3) stays genuinely dark for depth.
+    let we = warm_earth_factor(pri_h_deg, pri_c) * (1.0 - 0.85 * paper_mix);
     let we_bright = smoothstep_f64(0.32, 0.56, pri_lab[0]);
     let we_l = we * (0.28 + 0.72 * we_bright);
-    let we_shadow = we * (0.12 + 0.88 * we_bright);
+    let we_shadow = we * (0.10 + 0.45 * we_bright);
     let we_dark_chroma = 1.0 + 0.14 * we * (1.0 - we_bright);
-    let l_lift = [0.075 * we_l, 0.085 * we_l, 0.060 * we_l, 0.090 * we_shadow];
-    let l_ceil_add = [0.090 * we_l, 0.095 * we_l, 0.070 * we_l, 0.110 * we_shadow];
+    let l_lift = [0.065 * we_l, 0.070 * we_l, 0.050 * we_l, 0.025 * we_shadow];
+    let l_ceil_add = [0.080 * we_l, 0.080 * we_l, 0.060 * we_l, 0.030 * we_shadow];
+
+    let eff_paper = white_mix.max(paper_mix * 0.85);
 
     let mut tuned = [[0.0f64; 3]; K];
     let mut pri_pre_ln = 0.0f64;
     for (ci, &(lab, ls, lo, lmin, lmax, cs, cmin, cmax)) in lobe_specs.iter().enumerate() {
         let [l, a, b] = lab;
         let c = (a * a + b * b).sqrt();
-        let h = b.atan2(a) + hue_offsets[ci];
+        let mut h = b.atan2(a) + hue_offsets[ci];
+        let h_deg_i = h.to_degrees().rem_euclid(360.0);
         let stop_gate = ((c - 0.008) / 0.014).clamp(0.0, 1.0) * achromatic_scale;
         let mut ln = (l * ls + lo + l_lift[ci])
             .clamp(lmin + l_lift[ci] * 0.7, lmax + l_ceil_add[ci]);
@@ -679,8 +713,30 @@ fn blend_palette_flow(pixels: &mut [u8], sample_rgba: &[u8]) -> f32 {
             ln = ln.min(pri_pre_ln + 0.15 + 0.16 * black_mix);
         }
         let taper = 1.0 - smoothstep_f64(0.10, 0.19, c);
-        let eff_cs = 1.0 + (cs - 1.0) * (0.18 + 0.82 * taper);
-        let mut cn = (c * eff_cs * we_dark_chroma).clamp(cmin, f64::min(cmax, 0.185)) * stop_gate;
+        let mut eff_cs = 1.0 + (cs - 1.0) * (0.18 + 0.82 * taper);
+
+        // Per-lobe mud guard: when a bright cream/ivory cluster is darkened in the
+        // olive-yellow band, keep chroma clean and warm hue slightly off greenish-olive.
+        // Protect a vivid Accent lobe (ci == 2, c > 0.055) such as a golden highlight.
+        let accent_protect = if ci == 2 && c > 0.055 { 1.0 } else { 0.0 };
+        let lobe_mud = yellow_olive_mud(h_deg_i)
+            * smoothstep_f64(0.62, 0.80, l)
+            * (1.0 - smoothstep_f64(0.050, 0.090, c))
+            * (1.0 - accent_protect);
+        let cmin_eff = if lobe_mud > 0.01 {
+            eff_cs = 1.0 + (eff_cs - 1.0) * (1.0 - lobe_mud);
+            if h_deg_i > 72.0 {
+                h -= ((h_deg_i - 65.0).min(22.0) * 0.55 * lobe_mud).to_radians();
+            }
+            cmin * (1.0 - 0.85 * lobe_mud)
+        } else {
+            cmin
+        };
+
+        let mut cn = (c * eff_cs * we_dark_chroma).clamp(cmin_eff, f64::min(cmax, 0.185)) * stop_gate;
+        if lobe_mud > 0.01 {
+            cn *= 1.0 - 0.50 * lobe_mud;
+        }
 
         // Smoothly mix in more deep black for black-heavy covers (e.g. Bobby / Lost Weekend).
         if black_mix > 0.0 {
@@ -694,28 +750,35 @@ fn blend_palette_flow(pixels: &mut [u8], sample_rgba: &[u8]) -> f32 {
             cn *= 1.0 - 0.55 * b_w;
         }
 
-        // Smoothly mix in calm neutral grey for white-heavy covers (e.g. 21 / minor)
-        // at a strength symmetric with black_mix so white covers never overexpose.
-        if white_mix > 0.0 {
-            let g_w = match ci {
-                0 | 1 => 0.70 * white_mix,
-                3 => 0.68 * white_mix,
-                _ => 0.22 * white_mix, // keep accent restrained on minimal white covers
-            };
-            let grey_l = match ci {
-                0 => 0.32,
-                1 => 0.26,
-                3 => 0.19,
-                _ => 0.30,
+        // Smoothly mix in clean charcoal-grey with wide Chiaroscuro depth for white &
+        // warm-paper covers (e.g. Rumours / As It Was / Careful) while preserving
+        // coloured Secondary & vivid Accent lobes.
+        if eff_paper > 0.0 {
+            let sec_is_colored = (ci == 1) && !dominant_primary && (c > 0.032) && (l < 0.76);
+            let acc_is_vivid = (ci == 2) && (c > 0.050);
+            let (g_w, grey_l, c_damp) = match ci {
+                0 => (0.62 * eff_paper, 0.43, 0.78 * 0.62 * eff_paper),
+                1 => {
+                    let w = (if sec_is_colored { 0.16 } else { 0.52 }) * eff_paper;
+                    let cd = (if sec_is_colored { 0.20 } else { 0.72 }) * w;
+                    (w, 0.25, cd)
+                }
+                3 => (0.72 * eff_paper, 0.09, 0.78 * 0.72 * eff_paper),
+                _ => {
+                    let w = (if acc_is_vivid { 0.06 } else { 0.16 }) * eff_paper;
+                    let cd = (if acc_is_vivid { 0.08 } else { 0.35 }) * w;
+                    (w, 0.36, cd)
+                }
             };
             ln = ln * (1.0 - g_w) + grey_l * g_w;
-            cn *= 1.0 - 0.80 * g_w;
+            cn *= 1.0 - c_damp;
         }
 
         tuned[ci] = [ln, cn * h.cos(), cn * h.sin()];
     }
 
-    let palette_weight = ((0.26 - spatial_std) / 0.14 + 0.16 * mono).clamp(0.38, 0.88);
+    let palette_weight =
+        ((0.26 - spatial_std) / 0.14 + 0.16 * mono + 0.12 * eff_paper).clamp(0.38, 0.90);
     // Keep all 4 anchors well inside the visible 16:9 vertical band (0.21875..0.78125).
     let (acc_y, pri_y, deep_y) = if acc.cy >= 0.5 {
         (0.64f64, 0.34f64, 0.68f64)
@@ -729,19 +792,19 @@ fn blend_palette_flow(pixels: &mut [u8], sample_rgba: &[u8]) -> f32 {
     let mut s_acc = if dominant_primary {
         0.18 + 0.10 * area_gate
     } else {
-        0.20 + 0.05 * area_gate
+        0.22 + 0.06 * area_gate
     };
-    if white_mix > 0.0 {
-        s_acc *= 1.0 - 0.18 * white_mix;
+    if white_mix > 0.0 && acc.c <= 0.055 {
+        s_acc *= 1.0 - 0.15 * white_mix;
     }
-    let sigmas = [s_tight, 0.21, s_acc, 0.25];
+    let sigmas = [s_tight, 0.22, s_acc, 0.24];
     let mut acc_w = if dominant_primary {
         0.65 + 0.83 * area_gate
     } else {
-        0.70 + 0.30 * area_gate
+        0.85 + 0.35 * area_gate
     };
-    if white_mix > 0.0 {
-        acc_w *= 1.0 - 0.30 * white_mix;
+    if white_mix > 0.0 && acc.c <= 0.055 {
+        acc_w *= 1.0 - 0.22 * white_mix;
     }
     let lobe_weights = [1.0, 1.0, acc_w, 1.0];
 
@@ -802,6 +865,23 @@ fn apply_top_left_light(pixels: &mut [u8], light: f64) {
             }
         }
     }
+}
+
+/// The reference's `hd`: circular distance on the hue circle.
+fn hue_distance(x: f64, a: f64) -> f64 {
+    let t = (x - a).abs();
+    if t > 0.5 { 1.0 - t } else { t }
+}
+
+/// The reference's `win`: a smooth window of radius `r` around `a`.
+fn window(x: f64, a: f64, r: f64) -> f64 {
+    let t = 1.0 - hue_distance(x, a) / r;
+    t.clamp(0.0, 1.0)
+}
+
+/// The reference's `lin`: a clamped linear ramp.
+fn line(x: f64, a: f64, b: f64) -> f64 {
+    ((x - a) / (b - a)).clamp(0.0, 1.0)
 }
 
 /// RGB (0..1) to HSV. `%` keeps the dividend's sign, matching JavaScript.
@@ -947,5 +1027,39 @@ mod tests {
         let mut params = ColourParams::for_inner(400);
         colour_artwork(&mut scene, CoverSample::new(&sample), &mut params);
         assert!(scene.chunks_exact(4).all(|px| px[3] == 255));
+    }
+
+    #[test]
+    fn a_warm_cream_cover_stays_clean_charcoal_with_depth() {
+        // Warm ivory/cream backdrop (like Rumours / As It Was) should darken into
+        // clean low-chroma charcoal with Chiaroscuro depth, never saturated olive mud.
+        let sample = flat_sample([238, 232, 212]);
+        let mut scene = flat_scene([238, 232, 212]);
+        let mut params = ColourParams::for_inner(800);
+        colour_artwork(&mut scene, CoverSample::new(&sample), &mut params);
+
+        let mut c_sum = 0.0;
+        let mut l_min = 1.0f64;
+        let mut l_max = 0.0f64;
+        for px in scene.chunks_exact(4) {
+            let lab = linear_to_oklab(
+                srgb_to_linear(px[0] as f64 / 255.0),
+                srgb_to_linear(px[1] as f64 / 255.0),
+                srgb_to_linear(px[2] as f64 / 255.0),
+            );
+            c_sum += (lab[1] * lab[1] + lab[2] * lab[2]).sqrt();
+            l_min = l_min.min(lab[0]);
+            l_max = l_max.max(lab[0]);
+        }
+        let mean_c = c_sum / (SIZE * SIZE) as f64;
+        assert!(
+            mean_c < 0.028,
+            "warm cream backdrop turned overly chromatic/olive: mean_c={mean_c:.4}"
+        );
+        assert!(
+            l_max - l_min > 0.14,
+            "warm cream backdrop lost Chiaroscuro depth: spread={:.4}",
+            l_max - l_min
+        );
     }
 }

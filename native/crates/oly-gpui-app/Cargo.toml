@@ -26,6 +26,8 @@ base64 = "0.22"
 oly-render.workspace = true
 oly-platform-win.workspace = true
 
+raw-window-handle = "0.6"
+
 # The glass panels and the present-cadence probe own D3D11 objects directly,
 # for the same reason `oly-render`'s background pass does: a live-window
 # snapshot has to be copied and filtered on the window's own device.
@@ -35,8 +37,12 @@ features = [
     "Win32_Foundation",
     "Win32_Graphics_Direct3D",
     "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dwm",
     "Win32_Graphics_Dxgi_Common",
     "Win32_System_Performance",
+    "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
 ]
 
 [features]

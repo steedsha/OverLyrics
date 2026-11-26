@@ -160,7 +160,7 @@ impl Scenario {
         if name=="lens-drag"{return Some(Self{steps:vec![(100.,Act::OpenMore),(450.,Act::LensDragStart(0)),(520.,Act::LensDragMove(0)),(720.,Act::LensShot("more-drag.png")),(780.,Act::LensDragEnd),(900.,Act::MoreRow(4)),(1400.,Act::LensDragStart(1)),(1460.,Act::LensDragMove(1)),(1680.,Act::LensShot("app-drag-translate.png")),(1740.,Act::LensDragEnd),(1900.,Act::LensShot("app-translate-rest.png"))],next:0,last_step:None});}
         if name=="background-focus"{return Some(Self{steps:vec![(600.,Act::BackgroundShot(1)),(1400.,Act::BackgroundShot(2)),(1600.,Act::FocusAway),(1900.,Act::FrameSample),(3100.,Act::FrameRate)],next:0,last_step:None});}
         if name=="lyric-hover" {return Some(Self{steps:vec![(0.,Act::HoverLyric)],next:0,last_step:None});}
-        if name=="settings-corners"{return Some(Self{steps:vec![(100.,Act::DetailsMode),(250.,Act::OpenMore),(500.,Act::MoreRow(3)),(1200.,Act::DetailsProbe)],next:0,last_step:None});}
+        if name=="settings-corners"{return Some(Self{steps:vec![(100.,Act::DetailsMode),(250.,Act::OpenMore),(500.,Act::MoreRow(4)),(1200.,Act::DetailsProbe)],next:0,last_step:None});}
         if name=="fullscreen-roundtrip"{
             return Some(Self{steps:vec![
                 (100.,Act::SetMode(3)),
@@ -179,12 +179,12 @@ impl Scenario {
                 (4700.,Act::ProbeBounds(false,380.,650.)),
             ],next:0,last_step:None});
         }
-        if name=="compact-details"{return Some(Self{steps:vec![(100.,Act::DetailsMode),(250.,Act::OpenMore),(500.,Act::MoreRow(3)),(1200.,Act::DetailsProbe),(1600.,Act::DetailsDrag),(1750.,Act::DetailsColor),(2050.,Act::DetailsColorProbe),(2300.,Act::DetailsClose),(3100.,Act::DetailsClosed),(3200.,Act::DetailsShortcut),(3800.,Act::DetailsProbe),(4000.,Act::DetailsClose),(4600.,Act::DetailsClosed)],next:0,last_step:None});}
+        if name=="compact-details"{return Some(Self{steps:vec![(100.,Act::DetailsMode),(250.,Act::OpenMore),(500.,Act::MoreRow(4)),(1200.,Act::DetailsProbe),(1600.,Act::DetailsDrag),(1750.,Act::DetailsColor),(2050.,Act::DetailsColorProbe),(2300.,Act::DetailsClose),(3100.,Act::DetailsClosed),(3200.,Act::DetailsShortcut),(3800.,Act::DetailsProbe),(4000.,Act::DetailsClose),(4600.,Act::DetailsClosed)],next:0,last_step:None});}
         if name=="scrollbar" {return Some(Self{steps:vec![(100.,Act::Pause),(200.,Act::ThumbDown),(700.,Act::ThumbMove(45)),(12000.,Act::ThumbUp)],next:0,last_step:None});}
         if name == "liquid" {
             return Some(Self {steps:vec![
                 (100.0,Act::Pause),(500.0,Act::OpenMore),(570.0,Act::OpenMore),(620.0,Act::OpenMore),
-                (1100.0,Act::ToggleTranslation),(1160.0,Act::ToggleTranslation),(1600.0,Act::MoreRow(3)),
+                (1100.0,Act::ToggleTranslation),(1160.0,Act::ToggleTranslation),(1600.0,Act::MoreRow(4)),
                 (2300.0,Act::OpenVolume),(2700.0,Act::ClosePanels),(2780.0,Act::OpenVolume),
                 (3500.0,Act::ClosePanels),(4100.0,Act::OpenMore),(4800.0,Act::ClosePanels),
             ],next:0,last_step:None});
@@ -267,6 +267,7 @@ enum Hot {
     DropdownOption(u8),
     ModalCancel,
     ModalSave,
+    WindowPin,
     WindowMinimize,
     WindowFullscreen,
     WindowClose,
@@ -425,32 +426,33 @@ enum PanelKind {
 
 /// Everything the paint pass needs, computed before the closure is built so the
 /// paint never reaches back into the entity.
-struct PickerEntry {
-    title: String,
-    subtitle: String,
-    match_badge: String,
-    timing_badge: Option<&'static str>,
-    has_translation: bool,
-    smart_translation: bool,
-    smart_translation_key: String,
-    path: PathBuf,
-    source: String,
-    id: String,
-    candidate_index: usize,
-    selected: bool,
+#[derive(Clone, Debug)]
+pub(super) struct PickerEntry {
+    pub(super) title: String,
+    pub(super) subtitle: String,
+    pub(super) match_badge: String,
+    pub(super) timing_badge: Option<&'static str>,
+    pub(super) has_translation: bool,
+    pub(super) smart_translation: bool,
+    pub(super) smart_translation_key: String,
+    pub(super) path: PathBuf,
+    pub(super) source: String,
+    pub(super) id: String,
+    pub(super) candidate_index: usize,
+    pub(super) selected: bool,
 }
-const VERSION_HEADER: f32 = 42.0;
-const VERSION_ROW: f32 = 64.0;
+pub(super) const VERSION_HEADER: f32 = 42.0;
+pub(super) const VERSION_ROW: f32 = 64.0;
 
-fn picker_smart_btn_rect(row: Box4) -> Box4 {
+pub(super) fn picker_smart_btn_rect(row: Box4) -> Box4 {
     Box4::new(row.right() - 96.0, row.y + 30.0, 90.0, 22.0)
 }
 
-fn picker_refresh_rect(panel: GlassRect) -> Box4 {
+pub(super) fn picker_refresh_rect(panel: GlassRect) -> Box4 {
     Box4::new(panel.left as f32 + panel.width as f32 - 36.0, panel.top as f32 + 7.0, 26.0, 26.0)
 }
 
-fn picker_import_rect(panel: GlassRect) -> Box4 {
+pub(super) fn picker_import_rect(panel: GlassRect) -> Box4 {
     Box4::new(panel.left as f32 + panel.width as f32 - 66.0, panel.top as f32 + 7.0, 26.0, 26.0)
 }
 
@@ -501,6 +503,7 @@ struct Plan {
     volume_available: bool,
     mode:Mode,
     fullscreen:bool,
+    always_on_top: bool,
     chrome_visible:bool,
     content_alpha: f32,
     chrome_alpha: f32,
@@ -508,7 +511,7 @@ struct Plan {
     album_meta_alpha: f32,
     cover_scale: f32,
     cover_vis: f32,
-    picker_start:usize,
+    picker_scroll_px: f32,
     picker_kind: PickerKind,
     show_media_row: bool,
     picker_refresh_angle: f32,
@@ -577,19 +580,21 @@ fn picker_smart_switch_rect(row: Box4) -> Box4 {
     Box4::new(btn.right() - 34.0, btn.y + 2.5, 34.0, 19.0)
 }
 
-fn window_caption_rects(win_w: f32, compact: bool) -> (Box4, [Box4; 3]) {
+fn window_caption_rects(win_w: f32, compact: bool) -> (Box4, [Box4; 4]) {
     if compact {
-        let zone = Box4::new((win_w - 112.0).max(0.0), 0.0, 112.0, 48.0);
+        let zone = Box4::new((win_w - 138.0).max(0.0), 0.0, 138.0, 48.0);
+        let pin_b = Box4::new(win_w - 110.0, 10.0, 22.0, 22.0);
         let min_b = Box4::new(win_w - 84.0, 10.0, 22.0, 22.0);
         let fs_b = Box4::new(win_w - 58.0, 10.0, 22.0, 22.0);
         let close_b = Box4::new(win_w - 32.0, 10.0, 22.0, 22.0);
-        (zone, [min_b, fs_b, close_b])
+        (zone, [pin_b, min_b, fs_b, close_b])
     } else {
-        let zone = Box4::new((win_w - 160.0).max(0.0), 0.0, 160.0, 74.0);
+        let zone = Box4::new((win_w - 194.0).max(0.0), 0.0, 194.0, 74.0);
+        let pin_b = Box4::new(win_w - 144.0, 14.0, 28.0, 28.0);
         let min_b = Box4::new(win_w - 110.0, 14.0, 28.0, 28.0);
         let fs_b = Box4::new(win_w - 76.0, 14.0, 28.0, 28.0);
         let close_b = Box4::new(win_w - 42.0, 14.0, 28.0, 28.0);
-        (zone, [min_b, fs_b, close_b])
+        (zone, [pin_b, min_b, fs_b, close_b])
     }
 }
 
@@ -599,6 +604,12 @@ pub struct PlayerView {
     settings_host:Option<SettingsHost>,
     settings_child:Option<AnyWindowHandle>,
     settings_child_view:Option<WeakEntity<PlayerView>>,
+    desktop_child: Option<AnyWindowHandle>,
+    desktop_bridge: Arc<super::desktop_lyrics::SharedDesktopBridge>,
+    desktop_candidates_cache: Arc<Vec<PickerEntry>>,
+    desktop_candidates_next_ms: f64,
+    pending_desktop_lyrics: bool,
+    main_hwnd: Option<isize>,
     pending_settings_window:Option<usize>,
     sync_settings_child_config: bool,
     pending_import_rx: Option<std::sync::mpsc::Receiver<Option<PathBuf>>>,
@@ -630,10 +641,12 @@ pub struct PlayerView {
     segmented_drag: Option<(usize, &'static str, Box4, usize)>,
     pre_fullscreen_mode: u8,
     last_fullscreen: bool,
+    always_on_top: bool,
+    applied_always_on_top: Option<bool>,
     window_controls_alpha: f32,
     pending_minimize: bool,
     pending_quit: bool,
-    picker_start:usize,
+    picker_scroll_spring: oly_core::scroll::Spring,
     picker_capacity:usize,
     picker_kind: PickerKind,
     chrome_wake_ms:f64,
@@ -827,7 +840,7 @@ impl PlayerView {
         let scenario = cfg.scenario.as_deref().and_then(Scenario::named);
         let sync=SyncState::new(cfg.source==Source::Live);
         let start_idle = cfg.source == Source::Live && !cfg.settings_only;
-        let mut this = Self {settings_host:None,settings_child:None,settings_child_view:None,pending_settings_window:None,sync_settings_child_config:false,pending_import_rx:None,native_background:None,doc_auto_picked:false,auto_pick_persisted:false,qa_frame_sample:None,smart_translation_worker:None,translation_signature:None,translated_rows:Vec::new(),search_config:None,pressed_candidate:None,
+        let mut this = Self {settings_host:None,settings_child:None,settings_child_view:None,desktop_child:None,desktop_bridge:super::desktop_lyrics::SharedDesktopBridge::new(),desktop_candidates_cache:Arc::new(Vec::new()),desktop_candidates_next_ms:0.0,pending_desktop_lyrics:false,main_hwnd:None,pending_settings_window:None,sync_settings_child_config:false,pending_import_rx:None,native_background:None,doc_auto_picked:false,auto_pick_persisted:false,qa_frame_sample:None,smart_translation_worker:None,translation_signature:None,translated_rows:Vec::new(),search_config:None,pressed_candidate:None,
             cfg,
             focus: cx.focus_handle(),
             scene: None,
@@ -841,7 +854,7 @@ impl PlayerView {
             shaper,
             display: Display::default(),
             settings:Settings::default(),
-            sync,pending_mode:None,switch_drag:None,segmented_drag:None,pre_fullscreen_mode:2,last_fullscreen:false,window_controls_alpha:0.0,pending_minimize:false,pending_quit:false,picker_start:0,picker_capacity:4,picker_kind:PickerKind::Lyrics,chrome_wake_ms:0.,cursor_idle_ms:0.,cursor_hide_pending:false,browse_idle_ms:0.,lyrics_user_hidden:false,lyrics_auto_hidden:start_idle,lyrics_user_force_shown:false,lyrics_center:{let mut s=oly_core::scroll::Spring::new(if start_idle {1.0} else {0.0});s.update_params(oly_core::scroll::SpringParams::new(140.0,22.0));s},lyrics_reveal_alpha:if start_idle {0.0} else {1.0},staged_mode:None,wide_size:None,last_window_bounds:None,
+            sync,pending_mode:None,switch_drag:None,segmented_drag:None,pre_fullscreen_mode:2,last_fullscreen:false,always_on_top:false,applied_always_on_top:None,window_controls_alpha:0.0,pending_minimize:false,pending_quit:false,picker_scroll_spring:{let mut s=oly_core::scroll::Spring::new(0.0);s.update_params(oly_core::scroll::SpringParams::new(220.0,26.0));s},picker_capacity:4,picker_kind:PickerKind::Lyrics,chrome_wake_ms:0.,cursor_idle_ms:0.,cursor_hide_pending:false,browse_idle_ms:0.,lyrics_user_hidden:false,lyrics_auto_hidden:start_idle,lyrics_user_force_shown:false,lyrics_center:{let mut s=oly_core::scroll::Spring::new(if start_idle {1.0} else {0.0});s.update_params(oly_core::scroll::SpringParams::new(140.0,22.0));s},lyrics_reveal_alpha:if start_idle {0.0} else {1.0},staged_mode:None,wide_size:None,last_window_bounds:None,
             mode_transition:None,geometry_memory:Default::default(),
             volume_req_id:0,volume_read_id:None,volume_read_deadline_ms:None,volume_cached:None,
             pending_motion_path:None,motion_debounce_deadline_ms:None,motion_dispatched:None,motion_needs_clear:false,motion_last_enabled:true,motion_fade:0.0,inline_switch_drag:None,bg_cover_hash:None,prev_cover_rgba:None,cover_fade:1.0,cover_blend_buf:Vec::new(),cover_accent_hex:None,island_wake_ms:-10_000.0,island_drop:0.0,cover_gone_at_ms:None,compact_chrome_alpha:1.0,album_meta_alpha:1.0,
@@ -956,6 +969,14 @@ impl PlayerView {
             this.playing = false;
         }
         this.sync_profile_display();
+        if !this.cfg.settings_only {
+            this.always_on_top = this
+                .settings
+                .config
+                .pointer("/window/alwaysOnTop")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+        }
         this.pos_y_params = this.display.spring_params();
         this.prev_playing = this.playing;
         this.play_morph = {
@@ -1448,9 +1469,19 @@ impl PlayerView {
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
             }
         }
-        if self.tool.panels().volume_open {
+        let desktop_vol_active = self.desktop_child.is_some();
+        if self.tool.panels().volume_open || desktop_vol_active {
             if !self.volume.app().is_empty() && active_app != self.volume.app() {
-                self.close_volume_panel();
+                if self.tool.panels().volume_open {
+                    self.close_volume_panel();
+                } else if !active_app.is_empty() {
+                    self.open_live_volume(mono_now);
+                } else {
+                    self.volume_read_id = None;
+                    self.volume_read_deadline_ms = None;
+                    self.volume = VolumePanel::open("", None, VolumeSource::Internal);
+                    self.volume.on_error();
+                }
             } else {
                 for ev in vol_events {
                     if self.volume_read_id == Some(ev.request_id) {
@@ -2726,7 +2757,7 @@ impl PlayerView {
                     let (key,before,after)=self.settings_child_view.clone().unwrap().update(cx,|child,cx|{
                         let panel=child.panel_bounds.last().copied().expect("settings panel");
                         if !child.settings.rows(panel).iter().any(|(_,item,_)|matches!(item.control,Control::Switch)) {
-                            child.settings.scroll = child.settings.max_scroll(panel);
+                            child.settings.set_scroll_immediate(child.settings.max_scroll(panel));
                             child.hot.retain(|(h,_)|!matches!(h,Hot::SettingSlider(_)|Hot::SettingChoice(_)));
                             for (i,item,row) in child.settings.rows(panel) {
                                 child.hot.push((match item.control.slider_bounds() {Some(_)=>Hot::SettingSlider(i as u8),None=>Hot::SettingChoice(i as u8)},match item.control.slider_bounds(){Some(_)=>Box4::new(row.x+8.0,row.y+26.0,row.w-16.0,27.0),None=>row}));
@@ -2839,7 +2870,7 @@ impl PlayerView {
         let active_player=self.settings.active_player.clone();
         if let Some(child)=self.settings_child {
             if child.update(cx,|_,w,_|{w.set_window_title(win_title);w.set_bounds(gpui_kit::bounds(point(px(rect.x),px(rect.y)),size(px(rect.w),px(rect.h))));w.activate_window();}).is_ok(){
-                if let Some(view)=&self.settings_child_view{let _=view.update(cx,|v,cx|{v.settings.profile=profile;v.settings.active_player=active_player;v.settings.set_kind(kind);v.settings.open=true;v.settings.page=page;v.settings.title=sheet_title;v.settings.scroll=0.0;v.settings.close_choice();v.sync_profile_display();cx.notify();});}
+                if let Some(view)=&self.settings_child_view{let _=view.update(cx,|v,cx|{v.settings.profile=profile;v.settings.active_player=active_player;v.settings.set_kind(kind);v.settings.open=true;v.settings.page=page;v.settings.title=sheet_title;v.settings.set_scroll_immediate(0.0);v.settings.close_choice();v.sync_profile_display();cx.notify();});}
                 return;
             }
             self.settings_child=None;
@@ -2857,7 +2888,7 @@ impl PlayerView {
         let options=WindowOptions{
             window_bounds:Some(WindowBounds::Windowed(gpui_kit::bounds(point(px(rect.x),px(rect.y)),size(px(rect.w),px(rect.h))))),
             titlebar:Some(TitlebarOptions{title:Some(win_title.into()),appears_transparent:true,..Default::default()}),
-            window_background:WindowBackgroundAppearance::Blurred,is_resizable:false,is_minimizable:false,
+            window_background:WindowBackgroundAppearance::Transparent,is_resizable:false,is_minimizable:false,
             display_id:window.display(cx).map(|d|d.id()),..Default::default()
         };
         match gpui_kit::open_window(options,cx,move|w,cx|cx.new(|cx|{
@@ -2871,10 +2902,392 @@ impl PlayerView {
         })){
             Ok((child,view))=>{
                 self.settings_child_view=Some(view.downgrade());
-                if let Some(root)=child.downcast::<gpui_kit::base::Root>(){let _=root.update(cx,|r,_,cx|{r.style().background=Some(gpui_kit::transparent_black().into());cx.notify();});}
+                if let Some(root)=child.downcast::<gpui_kit::base::Root>(){let _=root.update(cx,|r,w,cx|{r.style().background=Some(gpui_kit::transparent_black().into());if let Some(h)=super::win32_window::hwnd_from_window(w){super::win32_window::disable_dwm_corners_and_border(h);if self.always_on_top {super::win32_window::set_always_on_top(h,true);}}cx.notify();});}
                 self.settings_child=Some(child);log::info!("[settings-sidecar] side={side:?} page={page} host={host:?} bounds={rect:?}");
             }
             Err(error)=>{log::warn!("settings side window: {error}");self.settings.open=true;}
+        }
+    }
+
+    pub fn restore_from_desktop_lyrics(&mut self) {
+        self.desktop_child = None;
+        if let Some(h) = self.main_hwnd {
+            super::win32_window::set_window_visible(h, true);
+        }
+    }
+
+    pub fn tick_live_for_desktop(&mut self) {
+        let now_ms = self.now_ms();
+        let live_now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64() * 1000.0)
+            .unwrap_or(now_ms);
+        self.advance(now_ms, live_now_ms);
+
+        let mut candidates_dirty = false;
+        for cmd in self.desktop_bridge.drain_commands() {
+            match cmd {
+                super::desktop_lyrics::DesktopCommand::Prev => {
+                    self.live_action(oly_platform_win::smtc::control::Action::Prev);
+                    candidates_dirty = true;
+                }
+                super::desktop_lyrics::DesktopCommand::PlayPause => {
+                    self.live_toggle();
+                }
+                super::desktop_lyrics::DesktopCommand::Next => {
+                    self.live_action(oly_platform_win::smtc::control::Action::Next);
+                    candidates_dirty = true;
+                }
+                super::desktop_lyrics::DesktopCommand::SyncNudge(delta) => {
+                    self.nudge_sync(delta);
+                }
+                super::desktop_lyrics::DesktopCommand::OpenVolume => {
+                    self.open_live_volume(now_ms);
+                }
+                super::desktop_lyrics::DesktopCommand::SetVolumePct(pct) => {
+                    if self.volume.app().trim().is_empty() {
+                        self.open_live_volume(now_ms);
+                    }
+                    let clamped = pct.clamp(0.0, 100.0);
+                    if self.volume.status().is_editable() {
+                        if let Some(write) = self.volume.on_slide(clamped, now_ms) {
+                            self.send_volume_write(write);
+                        }
+                    } else if let Some(app) = self
+                        .live
+                        .as_ref()
+                        .and_then(|l| l.model.packet.as_ref())
+                        .map(|p| p.app.clone())
+                        .filter(|a| !a.trim().is_empty())
+                    {
+                        self.send_volume_write(VolumeWrite {
+                            app,
+                            value: clamped,
+                            source: VolumeSource::AppMixer,
+                            generation: 0,
+                        });
+                    }
+                }
+                super::desktop_lyrics::DesktopCommand::PickCandidate(i) => {
+                    self.picker_kind = PickerKind::Lyrics;
+                    self.pick_lyric_candidate_at(i);
+                    candidates_dirty = true;
+                }
+                super::desktop_lyrics::DesktopCommand::ToggleSmartTranslation(i) => {
+                    self.picker_kind = PickerKind::Lyrics;
+                    self.toggle_smart_translation_at(i);
+                    candidates_dirty = true;
+                }
+                super::desktop_lyrics::DesktopCommand::RefreshLyrics => {
+                    self.picker_kind = PickerKind::Lyrics;
+                    self.trigger_picker_refresh();
+                    candidates_dirty = true;
+                }
+                super::desktop_lyrics::DesktopCommand::ImportLyrics => {
+                    self.trigger_picker_import();
+                    candidates_dirty = true;
+                }
+                super::desktop_lyrics::DesktopCommand::ReturnToMain
+                | super::desktop_lyrics::DesktopCommand::Close => {
+                    self.restore_from_desktop_lyrics();
+                }
+                super::desktop_lyrics::DesktopCommand::SaveConfig(cfg) => {
+                    let patch = cfg.to_patch();
+                    if let Some(live) = self.live.as_ref() {
+                        let _ = live.config.patch(patch.clone());
+                    }
+                    if let Some(obj) = self.settings.config.as_object_mut() {
+                        if let Some(dl) = patch.get("desktopLyrics") {
+                            obj.insert("desktopLyrics".into(), dl.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        let pos = self.lyric_time();
+        // Zero-allocation single pass over main lyric rows.
+        let mut active_pair: Option<(usize, &Row)> = None;
+        let mut first_main: Option<(usize, &Row)> = None;
+        let mut last_main: Option<(usize, &Row)> = None;
+        let mut prev_before_next: Option<(usize, &Row)> = None;
+        let mut next_after_pos: Option<(usize, &Row)> = None;
+        for (idx, r) in self.rows.iter().enumerate() {
+            if r.is_bg || r.text.trim().is_empty() {
+                continue;
+            }
+            if first_main.is_none() {
+                first_main = Some((idx, r));
+            }
+            if pos >= r.start_ms && pos <= r.end_ms + 350.0 {
+                active_pair = Some((idx, r));
+            }
+            if next_after_pos.is_none() {
+                if r.start_ms > pos {
+                    prev_before_next = last_main;
+                    next_after_pos = Some((idx, r));
+                }
+            }
+            last_main = Some((idx, r));
+        }
+
+        let mut interlude_range = None;
+        if active_pair.is_none() && first_main.is_some() {
+            if let Some((_, next_row)) = next_after_pos {
+                let next_start = next_row.start_ms;
+                let prev_end = prev_before_next.map(|(_, r)| r.end_ms).unwrap_or(0.0);
+                if next_start - prev_end >= 3000.0 && pos >= prev_end && pos < next_start {
+                    interlude_range = Some((prev_end, next_start));
+                } else if let Some(prev) = prev_before_next {
+                    active_pair = Some(prev);
+                } else {
+                    active_pair = first_main;
+                }
+            } else {
+                active_pair = last_main;
+            }
+        }
+
+        let (active_row_index, active_row) = match active_pair {
+            Some((idx, r)) => (Some(idx), Some(r.clone())),
+            None => (None, None),
+        };
+        let (track_title, track_artist) = self
+            .live
+            .as_ref()
+            .and_then(|l| l.track.as_ref())
+            .map(|t| {
+                let raw_a = t.artist.as_deref().unwrap_or("");
+                let (clean_a, _) = oly_engine::motion_cover::split_smtc_artist_album(raw_a, "");
+                (t.title.clone(), clean_a)
+            })
+            .or_else(|| {
+                self.doc
+                    .as_ref()
+                    .map(|d| (d.title.clone(), d.artist.clone()))
+            })
+            .unwrap_or_default();
+        let volume_enabled = self.volume.status().is_editable();
+        let volume_pct = if volume_enabled {
+            self.volume.value()
+        } else {
+            self.volume_cached
+                .as_ref()
+                .map(|(_, v)| *v)
+                .unwrap_or_else(|| self.volume.value())
+        };
+        let volume_status = if volume_enabled {
+            format!("{}%", volume_pct.round() as i32)
+        } else {
+            "—".into()
+        };
+        let volume_label = self.volume.status().label().to_string();
+        if candidates_dirty || now_ms >= self.desktop_candidates_next_ms {
+            let saved_kind = self.picker_kind;
+            self.picker_kind = PickerKind::Lyrics;
+            self.desktop_candidates_cache = Arc::new(self.candidates());
+            self.picker_kind = saved_kind;
+            self.desktop_candidates_next_ms = now_ms + 350.0;
+        }
+        let candidates = Arc::clone(&self.desktop_candidates_cache);
+        let refresh_searching = self.picker_refresh_active
+            || self.live.as_ref().is_some_and(|l| l.status == "正在搜索歌词…");
+        self.desktop_bridge
+            .update_snapshot(super::desktop_lyrics::DesktopSnapshot {
+                playing: self.playing,
+                track_title,
+                track_artist,
+                display: self.display,
+                position_ms: pos,
+                active_row,
+                active_row_index,
+                interlude_range,
+                sync_offset_ms: self.sync.offset_ms(),
+                volume_pct,
+                volume_enabled,
+                volume_status,
+                volume_label,
+                candidates,
+                refresh_searching,
+            });
+    }
+
+    fn toggle_smart_translation_at(&mut self, i: usize) {
+        if let Some(entry) = self.candidates().get(i) {
+            let key = entry.smart_translation_key.clone();
+            if !key.is_empty() {
+                let on = !entry.smart_translation;
+                let mut overrides = self.settings.config["lyrics"]["translationOverrides"]
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_default();
+                overrides.insert(key, serde_json::json!(on));
+                self.change_setting(
+                    "lyrics.translationOverrides",
+                    serde_json::Value::Object(overrides),
+                );
+            }
+        }
+    }
+
+    fn trigger_picker_import(&mut self) {
+        if self.pending_import_rx.is_none() {
+            let (tx, rx) = std::sync::mpsc::channel();
+            self.pending_import_rx = Some(rx);
+            std::thread::Builder::new()
+                .name("lyric-file-dialog".into())
+                .spawn(move || {
+                    let _ = tx.send(oly_platform_win::file_dialog::pick_lyric_file());
+                })
+                .ok();
+        }
+    }
+
+    fn trigger_picker_refresh(&mut self) {
+        self.picker_refresh_spinning = true;
+        let locked_rows = self.candidates().len().clamp(1, 4);
+        if let Some(live) = self.live.as_mut() {
+            live.search.clear_cache();
+            self.picker_scroll_spring.set_position(0.0);
+            self.picker_scroll_spring.set_target_position(0.0);
+            let valid_track = !live
+                .model
+                .packet
+                .as_ref()
+                .is_none_or(oly_contracts::PlayerPacket::is_idle_state);
+            if let Some(track) = live.track.clone().filter(|_| valid_track) {
+                self.picker_refresh_active = true;
+                self.picker_locked_rows = Some(locked_rows);
+                live.search.request(live.model.generation(), track, None);
+                live.status = "正在搜索歌词…".into();
+            }
+        }
+    }
+
+    fn pick_lyric_candidate_at(&mut self, i: usize) {
+        let visible = self.candidates();
+        if self.picker_kind == PickerKind::Media {
+            if let Some(entry) = visible.get(i) {
+                if let Some(live) = self.live.as_mut() {
+                    let target = if entry.source == "media-auto" {
+                        None
+                    } else {
+                        Some(entry.id.clone())
+                    };
+                    live.pinned_media_app = target.clone();
+                    let _ = live
+                        .host
+                        .dispatch(crate::commands::HostCommand::SetPinnedSession(target));
+                }
+            }
+            return;
+        }
+        if let Some(custom_entry) = visible.get(i).filter(|r| r.source == "custom") {
+            if let Some(doc) = self
+                .live
+                .as_ref()
+                .and_then(|l| l.custom_lyrics.get_doc(&custom_entry.id))
+            {
+                self.doc_auto_picked = false;
+                self.auto_pick_persisted = false;
+                self.doc_identity = Some(("custom".into(), custom_entry.id.clone()));
+                self.doc_provider = "custom".into();
+                self.lyrics_auto_hidden = doc.instrumental;
+                self.install_document(doc, false);
+            }
+            return;
+        }
+        let wanted = self
+            .pressed_candidate
+            .clone()
+            .or_else(|| {
+                visible
+                    .get(i)
+                    .map(|r| (r.source.clone(), r.id.clone(), r.candidate_index))
+            })
+            .filter(|(source, id, _)| visible.iter().any(|r| &r.source == source && &r.id == id));
+        if let Some(live) = self.live.as_mut() {
+            let selected = wanted.and_then(|(source, id, index)| {
+                live.candidates
+                    .get(index)
+                    .filter(|c| c.source == source && c.id == id)
+                    .or_else(|| {
+                        live.candidates
+                            .iter()
+                            .find(|c| c.source == source && c.id == id)
+                    })
+                    .cloned()
+            });
+            if let (Some(track), Some(candidate)) = (live.track.clone(), selected) {
+                live.search
+                    .request(live.model.generation(), track, Some(candidate));
+                live.status = "正在加载歌词…".into();
+            }
+            return;
+        }
+        let list = self.candidates();
+        if let Some(entry) = list.get(i) {
+            let path = entry.path.clone();
+            self.load_document(&path);
+        }
+    }
+
+    fn open_desktop_lyrics_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.desktop_child.is_some() {
+            if let Some(h) = self.main_hwnd {
+                super::win32_window::set_window_visible(h, false);
+            }
+            return;
+        }
+        if let Some(child) = self.settings_child.take() {
+            let _ = child.update(cx, |_, w, _| w.remove_window());
+        }
+        let mut cfg = super::desktop_lyrics::DesktopLyricsConfig::from_config(&self.settings.config);
+        cfg.locked = false;
+        let (w, h) = cfg.window_size();
+        let (rx, ry) = cfg
+            .saved_pos()
+            .unwrap_or_else(|| super::desktop_lyrics::default_origin_for(cfg.orientation, window, cx));
+        let (x, y) = super::desktop_lyrics::clamp_origin(rx, ry, w, h, window, cx);
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(gpui_kit::bounds(
+                point(px(x), px(y)),
+                size(px(w), px(h)),
+            ))),
+            titlebar: Some(TitlebarOptions {
+                title: Some("OverLyrics Desktop Lyrics".into()),
+                appears_transparent: true,
+                traffic_light_position: None,
+            }),
+            window_background: WindowBackgroundAppearance::Transparent,
+            is_resizable: false,
+            is_minimizable: false,
+            focus: false,
+            display_id: window.display(cx).map(|d| d.id()),
+            ..Default::default()
+        };
+        let bridge = self.desktop_bridge.clone();
+        let parent = cx.entity().downgrade();
+        self.tick_live_for_desktop();
+        match gpui_kit::open_window(options, cx, move |_, cx| {
+            let text_system = cx.text_system().clone();
+            cx.new(|_| super::desktop_lyrics::DesktopLyricsView::new(bridge, parent, cfg, text_system))
+        }) {
+            Ok((child, _)) => {
+                if let Some(root) = child.downcast::<gpui_kit::base::Root>() {
+                    let _ = root.update(cx, |r, _, cx| {
+                        r.style().background = Some(gpui_kit::transparent_black().into());
+                        cx.notify();
+                    });
+                }
+                self.desktop_child = Some(child);
+                if let Some(hwnd) = self.main_hwnd {
+                    cx.defer(move |_| {
+                        super::win32_window::set_window_visible(hwnd, false);
+                    });
+                }
+            }
+            Err(error) => log::warn!("desktop lyrics window: {error}"),
         }
     }
 
@@ -3033,19 +3446,49 @@ impl Render for PlayerView {
             self.pending_minimize = false;
             window.minimize_window();
         }
+        if let Some(msg) = crate::updater::global().take_notice() {
+            self.settings.status = msg;
+        }
+        if crate::updater::global().take_restart_ready() {
+            self.pending_quit = true;
+        }
         if self.pending_quit {
             self.pending_quit = false;
             self.settings.finish_edit(self.now_ms(), true);
             if let Some(child) = self.settings_child.take() {
                 let _ = child.update(cx, |_, w, _| w.remove_window());
             }
+            if let Some(child) = self.desktop_child.take() {
+                let _ = child.update(cx, |_, w, _| w.remove_window());
+            }
             cx.quit();
+        }
+        if self.settings_host.is_none() {
+            if self.main_hwnd.is_none() {
+                self.main_hwnd = super::win32_window::hwnd_from_window(window);
+            }
+            if self.pending_desktop_lyrics {
+                self.pending_desktop_lyrics = false;
+                let this = cx.entity().downgrade();
+                window.defer(cx, move |w, cx| {
+                    let _ = this.update(cx, |pv, cx| {
+                        pv.open_desktop_lyrics_window(w, cx);
+                    });
+                });
+            }
         }
         if let Some(page) = self.pending_settings_window.take() {
             self.open_settings_window(page, window, cx);
         }
         if self.settings_host.is_some() && !self.settings.open && !self.panel_motion[3].visible(){window.remove_window();return div().into_any_element();}
         if self.settings_host.is_none() {
+            let effective_top = self.always_on_top && !window.is_fullscreen();
+            if self.applied_always_on_top != Some(effective_top) {
+                if let Some(hwnd) = super::win32_window::hwnd_from_window(window) {
+                    super::win32_window::set_always_on_top(hwnd, effective_top);
+                    self.applied_always_on_top = Some(effective_top);
+                }
+            }
             if let Some(mode) = self.pending_mode.take() {
                 if let Some(child) = self.settings_child.take() {
                     let _ = child.update(cx, |_, w, _| w.remove_window());
@@ -3577,8 +4020,8 @@ impl Render for PlayerView {
             (engine.offset(), engine.min_offset(), engine.max_offset()),
         );
         self.settings.viewport_h = m.win_h;
-        match self.tool.mode() {
-            Some(Mode::Mini)=>{
+        match render_mode {
+            Mode::Mini => {
                 chrome.prev=Box4::new(m.win_w/2.-96.,88.,40.,40.);
                 chrome.play=Box4::new(m.win_w/2.-24.,86.,48.,44.);
                 chrome.next=Box4::new(m.win_w/2.+56.,88.,40.,40.);
@@ -3586,7 +4029,7 @@ impl Render for PlayerView {
                 chrome.volume=Box4::new(0.,0.,0.,0.);
                 chrome.lyrics_toggle=Box4::new(0.,0.,0.,0.);
             }
-            Some(Mode::Album)=>{
+            Mode::Album => {
                 let x=(m.win_w-296.)/2.;let y=m.win_h-56.;
                 chrome.volume=Box4::new(x+4.,y+4.,34.,34.);
                 chrome.prev=Box4::new(x+60.,y+2.,38.,38.);
@@ -3595,7 +4038,7 @@ impl Render for PlayerView {
                 chrome.more=Box4::new(x+258.,y+4.,34.,34.);
                 chrome.lyrics_toggle=Box4::new(0.,0.,0.,0.);
             }
-            Some(Mode::Lyrics)=>{
+            Mode::Lyrics => {
                 let x=(m.win_w-296.)/2.;let y=m.win_h-106.;
                 chrome.volume=Box4::new(x+4.,y+8.,36.,36.);
                 chrome.prev=Box4::new(x+60.,y+4.,44.,44.);
@@ -3604,7 +4047,7 @@ impl Render for PlayerView {
                 chrome.more=Box4::new(x+256.,y+8.,36.,36.);
                 chrome.lyrics_toggle=Box4::new(0.,0.,0.,0.);
             }
-            _=>{}
+            _ => {}
         }
         if render_mode == Mode::Window && center_t > 0.0001 {
             let center_left = ((m.win_w - m.column) * 0.5).max(16.0);
@@ -3631,20 +4074,25 @@ impl Render for PlayerView {
             || self.settings.open
             || self.pressed.is_some();
         if compact_auto_hide {
-            self.album_meta_alpha = model::step_opacity(
-                self.album_meta_alpha,
-                if album_meta_wake { 1.0 } else { 0.0 },
-                dt,
-                if album_meta_wake { 150.0 } else { 360.0 },
-                false,
-            );
-            self.compact_chrome_alpha = model::step_opacity(
-                self.compact_chrome_alpha,
-                if compact_wake { 1.0 } else { 0.0 },
-                dt,
-                if compact_wake { 240.0 } else { 300.0 },
-                false,
-            );
+            if chrome_alpha <= 0.01 && self.mode_transition.is_some() {
+                self.compact_chrome_alpha = if compact_wake { 1.0 } else { 0.0 };
+                self.album_meta_alpha = if album_meta_wake { 1.0 } else { 0.0 };
+            } else {
+                self.album_meta_alpha = model::step_opacity(
+                    self.album_meta_alpha,
+                    if album_meta_wake { 1.0 } else { 0.0 },
+                    dt,
+                    if album_meta_wake { 150.0 } else { 360.0 },
+                    false,
+                );
+                self.compact_chrome_alpha = model::step_opacity(
+                    self.compact_chrome_alpha,
+                    if compact_wake { 1.0 } else { 0.0 },
+                    dt,
+                    if compact_wake { 240.0 } else { 300.0 },
+                    false,
+                );
+            }
         } else {
             self.compact_chrome_alpha = 1.0;
             self.album_meta_alpha = 1.0;
@@ -3811,7 +4259,7 @@ impl Render for PlayerView {
             ));
         }
 
-        if matches!(self.tool.mode(), Some(Mode::Lyrics | Mode::Album)) && self.compact_chrome_alpha < 0.08 {hot.retain(|(h,_)|!matches!(h,Hot::Prev|Hot::Play|Hot::Next|Hot::Volume|Hot::More|Hot::LyricsToggle|Hot::Progress));}
+        if matches!(render_mode, Mode::Lyrics | Mode::Album) && self.compact_chrome_alpha < 0.08 {hot.retain(|(h,_)|!matches!(h,Hot::Prev|Hot::Play|Hot::Next|Hot::Volume|Hot::More|Hot::LyricsToggle|Hot::Progress));}
         if nocover_island && self.island_drop < 0.08 {
             hot.retain(|(h, _)| !matches!(h, Hot::Prev | Hot::Play | Hot::Next | Hot::Volume | Hot::More | Hot::LyricsToggle | Hot::Progress));
         }
@@ -3826,7 +4274,7 @@ impl Render for PlayerView {
         }
         let cap_allowed = self.settings_host.is_none();
         let cap_compact = matches!(render_mode, Mode::Mini | Mode::Album | Mode::Lyrics);
-        let (cap_zone, [cap_min, cap_fs, cap_close]) = window_caption_rects(m.win_w, cap_compact);
+        let (cap_zone, [cap_pin, cap_min, cap_fs, cap_close]) = window_caption_rects(m.win_w, cap_compact);
         let album_ret = album_return_rect();
         let album_ret_zone = Box4::new(0.0, 0.0, 52.0, 48.0);
         let cap_hovered = cap_allowed
@@ -3835,7 +4283,7 @@ impl Render for PlayerView {
                     && !self.panel_bounds.iter().any(|b| b.contains(cx, cy))
             }) || matches!(
                 self.pressed,
-                Some(Hot::WindowMinimize | Hot::WindowFullscreen | Hot::WindowClose | Hot::AlbumReturn)
+                Some(Hot::WindowPin | Hot::WindowMinimize | Hot::WindowFullscreen | Hot::WindowClose | Hot::AlbumReturn)
             ));
         if cap_allowed {
             self.window_controls_alpha = model::step_opacity(
@@ -3849,6 +4297,7 @@ impl Render for PlayerView {
             self.window_controls_alpha = 0.0;
         }
         if cap_allowed && (cap_hovered || self.window_controls_alpha > 0.05) {
+            hot.push((Hot::WindowPin, cap_pin));
             hot.push((Hot::WindowMinimize, cap_min));
             hot.push((Hot::WindowFullscreen, cap_fs));
             hot.push((Hot::WindowClose, cap_close));
@@ -4015,7 +4464,7 @@ impl Render for PlayerView {
                 }
                 if more_open {
                     let r=Box4::new(rect.left as f32,rect.top as f32,rect.width as f32,rect.height as f32);
-                    let row_count = if show_media { 5 } else { 4 };
+                    let row_count = if show_media { 6 } else { 5 };
                     for i in 0..4 {hot.push((Hot::MenuMode(i),input::mode_rect(r,i)));}
                     for i in 1..row_count {hot.push((Hot::MoreRow(i as u8),input::row_rect_count(r,i as u8,row_count)));}
                     if self.sync.enabled(){hot.push((Hot::SyncMinus,input::sync_rect_count(r,false,row_count)));hot.push((Hot::SyncPlus,input::sync_rect_count(r,true,row_count)));}
@@ -4123,8 +4572,15 @@ impl Render for PlayerView {
                 }
                 if !is_cover {
                     self.picker_capacity=(((rect.height as f32-VERSION_HEADER)/VERSION_ROW).floor() as usize).min(4);
-                    self.picker_start=self.picker_start.min(list.len().saturating_sub(self.picker_capacity));
+                    let max_scroll_px = list.len().saturating_sub(self.picker_capacity) as f32 * VERSION_ROW;
+                    let clamped_t = (self.picker_scroll_spring.target() as f32).clamp(0.0, max_scroll_px);
+                    self.picker_scroll_spring.set_target_position(clamped_t as f64);
+                    self.picker_scroll_spring.update(dt / 1000.0);
                 }
+                let picker_scroll_px = (self.picker_scroll_spring.position() as f32).clamp(
+                    0.0,
+                    list.len().saturating_sub(self.picker_capacity) as f32 * VERSION_ROW,
+                );
                 if picker_open {
                     if is_cover {
                         for i in 0..2u8 {
@@ -4138,8 +4594,14 @@ impl Render for PlayerView {
                             hot.push((Hot::PickerImport, picker_import_rect(rect)));
                             hot.push((Hot::PickerRefresh, picker_refresh_rect(rect)));
                         }
-                        for (i,entry) in list.iter().enumerate().skip(self.picker_start).take(self.picker_capacity) {
-                            let row_r=Box4::new(rect.left as f32+8.,rect.top as f32+VERSION_HEADER+(i-self.picker_start) as f32*VERSION_ROW,rect.width as f32-16.,VERSION_ROW-4.);
+                        let list_top = rect.top as f32 + VERSION_HEADER;
+                        let list_bot = list_top + self.picker_capacity as f32 * VERSION_ROW;
+                        for (i,entry) in list.iter().enumerate() {
+                            let y = list_top + i as f32 * VERSION_ROW - picker_scroll_px;
+                            let row_r=Box4::new(rect.left as f32+8.,y,rect.width as f32-16.,VERSION_ROW-4.);
+                            if row_r.bottom() <= list_top + 2.0 || row_r.y >= list_bot - 2.0 {
+                                continue;
+                            }
                             hot.push((Hot::Candidate(i),row_r));
                             if !entry.has_translation && !entry.smart_translation_key.is_empty() {
                                 hot.push((Hot::SmartTranslation(i),picker_smart_btn_rect(row_r)));
@@ -4152,7 +4614,7 @@ impl Render for PlayerView {
         let mut settings_paint=None;
         if self.panel_motion[3].visible() {
             let r=self.settings.panel_rect(m.win_w,m.win_h);
-            self.settings.scroll=self.settings.scroll.clamp(0.0,self.settings.max_scroll(r));
+            self.settings.clamp_scroll(self.settings.max_scroll(r));
             let motion=&self.panel_motion[3];
             let content_alpha=motion.content_alpha();let surface_alpha=motion.surface_alpha();
             let offset=motion.offset();let optical_motion=(1.0-motion.progress()).abs().min(1.0) as f32;
@@ -4312,10 +4774,10 @@ impl Render for PlayerView {
             }
             feedback_pending |= response.pending();
         }
-        let chrome_visible = !matches!(self.tool.mode(), Some(Mode::Lyrics | Mode::Album))
+        let chrome_visible = !matches!(render_mode, Mode::Lyrics | Mode::Album)
             || self.compact_chrome_alpha > 0.005;
         let hover_viewport = Box4::new(m.lyric_viewport.x, m.lyric_viewport.y,
-            m.lyric_viewport.w, (m.lyric_viewport.h - if self.tool.mode()==Some(Mode::Lyrics) && chrome_visible {164.} else {0.}).max(0.));
+            m.lyric_viewport.w, (m.lyric_viewport.h - if render_mode == Mode::Lyrics && chrome_visible {164.} else {0.}).max(0.));
         let hovered_lyric = if lyrics_alpha <= 0.01 {
             None
         } else {
@@ -4411,6 +4873,7 @@ impl Render for PlayerView {
         }
         if self.settings_host.is_none() {
             if self.window_controls_alpha > 0.02 {
+                btn_candidates.push((Hot::WindowPin, cap_pin, fb_of(Hot::WindowPin)));
                 btn_candidates.push((Hot::WindowMinimize, cap_min, fb_of(Hot::WindowMinimize)));
                 btn_candidates.push((Hot::WindowFullscreen, cap_fs, fb_of(Hot::WindowFullscreen)));
                 btn_candidates.push((Hot::WindowClose, cap_close, fb_of(Hot::WindowClose)));
@@ -4948,6 +5411,7 @@ impl Render for PlayerView {
             lyric_position_ms:self.lyric_time(),sync_enabled:self.sync.enabled(),sync_label:offset_label(self.sync.offset_ms()),
             volume_label,
             volume_available,
+            always_on_top: self.always_on_top,
             chrome_visible,
             content_alpha,
             chrome_alpha,
@@ -4955,7 +5419,7 @@ impl Render for PlayerView {
             album_meta_alpha: self.album_meta_alpha,
             cover_scale,
             cover_vis,
-            picker_start:self.picker_start,
+            picker_scroll_px: self.picker_scroll_spring.position().max(0.0) as f32,
             picker_kind: self.picker_kind,
             show_media_row: show_media,
             picker_refresh_angle: self.picker_refresh_angle,
@@ -4993,6 +5457,7 @@ impl Render for PlayerView {
         // run is pending: the pass advances on wall time, so stopping the frame
         // loop would freeze the scenario (and the exit timer) mid-clip.
         let animating = self.settings.animating()
+            || !self.picker_scroll_spring.arrived()
             || self.settings.status_alpha > 0.001
             || !self.lyrics_center.arrived()
             || (self.lyrics_reveal_alpha > 0.001 && self.lyrics_reveal_alpha < 0.999)
@@ -5180,28 +5645,31 @@ impl Render for PlayerView {
                 this.record_cursor_activity(now);
                 let p=ev.position;
                 if this.picker_open && this.panel_bounds.iter().any(|r|r.contains(p.x.into(),p.y.into())) {
-                    let delta=match ev.delta{ScrollDelta::Pixels(d)=>f32::from(d.y),ScrollDelta::Lines(d)=>d.y};
-                    let max=this.candidates().len().saturating_sub(this.picker_capacity);
-                    if delta<0.{this.picker_start=(this.picker_start+1).min(max);}else if delta>0.{this.picker_start=this.picker_start.saturating_sub(1);}
+                    let delta=match ev.delta{ScrollDelta::Pixels(d)=>f32::from(d.y),ScrollDelta::Lines(d)=>d.y*VERSION_ROW*0.85};
+                    let max_px=this.candidates().len().saturating_sub(this.picker_capacity) as f32 * VERSION_ROW;
+                    let next=((this.picker_scroll_spring.target() as f32) - delta).clamp(0.0, max_px);
+                    this.picker_scroll_spring.set_target_position(next as f64);
                     cx.notify();return;
                 }
                 if this.settings.open {
                     if this.settings.modal.is_some() {
                         return;
                     }
-                    let delta=match ev.delta {ScrollDelta::Pixels(d)=>f32::from(d.y),ScrollDelta::Lines(d)=>d.y*40.0};
+                    let delta=match ev.delta {ScrollDelta::Pixels(d)=>f32::from(d.y),ScrollDelta::Lines(d)=>d.y*48.0};
                     if let Some(panel_r) = this.panel_bounds.last().copied() {
                         if let Some(d) = this.settings.dropdown_layout(panel_r) {
                             if d.rect.contains(p.x.into(), p.y.into()) {
-                                this.settings.choice_scroll = (this.settings.choice_scroll - delta).clamp(0.0, d.max_scroll);
+                                this.settings.wheel_choice_scroll(delta, d.max_scroll);
                                 cx.notify();
                                 return;
                             }
                         }
                     }
-                    if this.panel_bounds.last().is_some_and(|r|r.contains(p.x.into(),p.y.into())) {
+                    if let Some(panel_r) = this.panel_bounds.last().copied().filter(|r| r.contains(p.x.into(), p.y.into())) {
                         this.settings.close_choice();
-                        this.settings.scroll=(this.settings.scroll-delta).max(0.0);cx.notify();return;
+                        let max_s = this.settings.max_scroll(panel_r);
+                        this.settings.wheel_scroll(delta, max_s);
+                        cx.notify();return;
                     }
                 }
                 let x=f32::from(p.x);let y=f32::from(p.y);
@@ -5455,6 +5923,42 @@ impl PlayerView {
     /// The picker's version list: every fixture beside the loaded one, so
     /// "choose a version" really swaps documents instead of faking a choice.
     fn execute_settings_action(&mut self, action: &str) -> (String, Option<serde_json::Value>) {
+        if action == "action.openWebsite" {
+            let url = crate::updater::WEBSITE_URL;
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                let _ = std::process::Command::new("cmd")
+                    .args(["/C", "start", "", url])
+                    .creation_flags(0x0800_0000)
+                    .spawn();
+            }
+            return ("已在浏览器中打开官方网站".into(), None);
+        }
+        if action == "action.checkUpdate" {
+            let mgr = crate::updater::global();
+            return match mgr.state() {
+                crate::updater::UpdateState::Available(info) => {
+                    if mgr.start_install(info) {
+                        ("正在下载新版本…".into(), None)
+                    } else {
+                        ("正在处理更新，请稍候…".into(), None)
+                    }
+                }
+                crate::updater::UpdateState::Checking
+                | crate::updater::UpdateState::Downloading { .. }
+                | crate::updater::UpdateState::ReadyToRestart { .. } => {
+                    ("正在处理更新，请稍候…".into(), None)
+                }
+                _ => {
+                    if mgr.start_check(false) {
+                        ("正在检查更新…".into(), None)
+                    } else {
+                        ("正在处理更新，请稍候…".into(), None)
+                    }
+                }
+            };
+        }
         if action == "action.openRepo" {
             let url = "https://github.com/steedsha/OverLyrics";
             #[cfg(windows)]
@@ -5734,7 +6238,8 @@ impl PlayerView {
                 self.doc_provider = "custom".into();
                 self.lyrics_auto_hidden = doc.instrumental;
                 self.install_document(doc, false);
-                self.picker_start = 0;
+                self.picker_scroll_spring.set_position(0.0);
+                self.picker_scroll_spring.set_target_position(0.0);
                 if open_picker {
                     self.settings.open = false;
                     self.settings.close_choice();
@@ -6341,23 +6846,31 @@ impl PlayerView {
             Some(Hot::MenuMode(mode))=>{self.pending_mode=Some(mode);},
             Some(Hot::MoreRow(1)) => {
                 self.picker_kind = PickerKind::Lyrics;
-                self.picker_start = 0;
+                self.picker_scroll_spring.set_position(0.0);
+                self.picker_scroll_spring.set_target_position(0.0);
                 self.picker_open = true;
             }
             Some(Hot::MoreRow(2)) => {
                 self.picker_kind = PickerKind::Cover;
-                self.picker_start = 0;
+                self.picker_scroll_spring.set_position(0.0);
+                self.picker_scroll_spring.set_target_position(0.0);
                 self.picker_open = true;
             }
             Some(Hot::MoreRow(i)) => {
                 let has_media = self.has_multiple_media_sessions();
-                if has_media && i == 3 {
+                let settings_idx = if has_media { 5 } else { 4 };
+                if i == 3 && self.settings_host.is_none() {
+                    self.pending_desktop_lyrics = true;
+                    self.tool.set_more_open(false);
+                    self.picker_open = false;
+                } else if has_media && i == 4 {
                     self.picker_kind = PickerKind::Media;
-                    self.picker_start = 0;
+                    self.picker_scroll_spring.set_position(0.0);
+                    self.picker_scroll_spring.set_target_position(0.0);
                     self.picker_open = true;
-                } else if (has_media && i == 4) || (!has_media && i == 3) {
+                } else if i == settings_idx {
                     self.settings.set_kind(settings::SettingsKind::Application);
-                    self.settings.scroll = 0.0;
+                    self.settings.set_scroll_immediate(0.0);
                     self.settings.close_choice();
                     if matches!(self.tool.mode(),Some(Mode::Mini|Mode::Lyrics)) && self.settings_host.is_none() {
                         self.settings.open = false;
@@ -6389,6 +6902,22 @@ impl PlayerView {
                 self.settings.commit_modal(self.now_ms());
             }
             Some(Hot::SettingSlider(index))=>{self.slide_setting(index,x);}
+            Some(Hot::WindowPin) => {
+                self.always_on_top = !self.always_on_top;
+                self.applied_always_on_top = None;
+                let patch = serde_json::json!({ "window": { "alwaysOnTop": self.always_on_top } });
+                if let Some(live) = self.live.as_ref() {
+                    let _ = live.config.patch(patch.clone());
+                }
+                if let Some(obj) = self.settings.config.as_object_mut() {
+                    let win_obj = obj
+                        .entry("window")
+                        .or_insert_with(|| serde_json::json!({}));
+                    if let Some(w) = win_obj.as_object_mut() {
+                        w.insert("alwaysOnTop".into(), serde_json::json!(self.always_on_top));
+                    }
+                }
+            }
             Some(Hot::WindowMinimize) => {
                 self.pending_minimize = true;
             }
@@ -6420,18 +6949,7 @@ impl PlayerView {
                 }
             }
             Some(Hot::SmartTranslation(i)) => {
-                if let Some(entry) = self.candidates().get(i) {
-                    let key = entry.smart_translation_key.clone();
-                    if !key.is_empty() {
-                        let on = !entry.smart_translation;
-                        let mut overrides = self.settings.config["lyrics"]["translationOverrides"]
-                            .as_object()
-                            .cloned()
-                            .unwrap_or_default();
-                        overrides.insert(key, serde_json::json!(on));
-                        self.change_setting("lyrics.translationOverrides", serde_json::Value::Object(overrides));
-                    }
-                }
+                self.toggle_smart_translation_at(i);
             }
             Some(Hot::AlbumEnter) => {
                 if self.tool.mode() == Some(Mode::Mini) {
@@ -6444,87 +6962,18 @@ impl PlayerView {
                 }
             }
             Some(Hot::PickerImport) => {
-                if self.pending_import_rx.is_none() {
-                    let (tx, rx) = std::sync::mpsc::channel();
-                    self.pending_import_rx = Some(rx);
-                    std::thread::Builder::new()
-                        .name("lyric-file-dialog".into())
-                        .spawn(move || {
-                            let _ = tx.send(oly_platform_win::file_dialog::pick_lyric_file());
-                        })
-                        .ok();
-                }
+                self.trigger_picker_import();
             }
             Some(Hot::PickerRefresh) => {
                 if let Some((_, fb)) = self.feedback.iter_mut().find(|(h, _)| *h == Hot::PickerRefresh) {
                     fb.trigger_hop(1.8);
                 }
-                self.picker_refresh_spinning = true;
-                let locked_rows = self.candidates().len().clamp(1, 4);
-                if let Some(live) = self.live.as_mut() {
-                    live.search.clear_cache();
-                    self.picker_start = 0;
-                    let valid_track = !live
-                        .model
-                        .packet
-                        .as_ref()
-                        .is_none_or(oly_contracts::PlayerPacket::is_idle_state);
-                    if let Some(track) = live.track.clone().filter(|_| valid_track) {
-                        self.picker_refresh_active = true;
-                        self.picker_locked_rows = Some(locked_rows);
-                        live.search.request(live.model.generation(), track, None);
-                        live.status = "正在搜索歌词…".into();
-                    }
-                }
+                self.trigger_picker_refresh();
             }
             Some(Hot::Candidate(i)) => {
                 self.tool.set_more_open(true);
                 self.picker_open = true;
-                let visible=self.candidates();
-                if self.picker_kind == PickerKind::Media {
-                    if let Some(entry) = visible.get(i) {
-                        if let Some(live) = self.live.as_mut() {
-                            let target = if entry.source == "media-auto" {
-                                None
-                            } else {
-                                Some(entry.id.clone())
-                            };
-                            live.pinned_media_app = target.clone();
-                            let _ = live.host.dispatch(crate::commands::HostCommand::SetPinnedSession(target));
-                        }
-                    }
-                    return;
-                }
-                if let Some(custom_entry) = visible.get(i).filter(|r| r.source == "custom") {
-                    if let Some(doc) = self
-                        .live
-                        .as_ref()
-                        .and_then(|l| l.custom_lyrics.get_doc(&custom_entry.id))
-                    {
-                        self.doc_auto_picked = false;
-                        self.auto_pick_persisted = false;
-                        self.doc_identity = Some(("custom".into(), custom_entry.id.clone()));
-                        self.doc_provider = "custom".into();
-                        self.lyrics_auto_hidden = doc.instrumental;
-                        self.install_document(doc, false);
-                    }
-                    return;
-                }
-                let wanted=self.pressed_candidate.clone().or_else(||visible.get(i).map(|r|(r.source.clone(),r.id.clone(),r.candidate_index))).filter(|(source,id,_)|visible.iter().any(|r|&r.source==source && &r.id==id));
-                if let Some(live) = self.live.as_mut() {
-                    let selected=wanted.and_then(|(source,id,index)|live.candidates.get(index).filter(|c|c.source==source && c.id==id).or_else(||live.candidates.iter().find(|c|c.source==source && c.id==id)).cloned());
-                    if let (Some(track), Some(candidate)) = (live.track.clone(), selected) {
-                        live.search.request(live.model.generation(), track, Some(candidate));
-                        live.status = "正在加载歌词…".into();
-
-                    }
-                    return;
-                }
-                let list = self.candidates();
-                if let Some(entry) = list.get(i) {
-                    let path = entry.path.clone();
-                    self.load_document(&path);
-                }
+                self.pick_lyric_candidate_at(i);
             }
             None => {
                 if self.settings.open && !self.panel_bounds.last().is_some_and(|r|r.contains(x,y)) {self.settings.close_choice();self.settings.open=false;}
@@ -7415,9 +7864,18 @@ fn paint_frame(
     let compact = matches!(plan.mode, Mode::Mini | Mode::Album | Mode::Lyrics);
     if !plan.settings_only && plan.window_controls_alpha > 0.01 {
         let wca = (plan.window_controls_alpha * fg_alpha).clamp(0.0, 1.0);
-        let (_, [cap_min, cap_fs, cap_close]) = window_caption_rects(m.win_w, compact);
+        let (_, [cap_pin, cap_min, cap_fs, cap_close]) = window_caption_rects(m.win_w, compact);
         let icon_d = if compact { 11.5 } else { 14.0 };
         let mut items = vec![
+            (
+                Hot::WindowPin,
+                cap_pin,
+                if plan.always_on_top {
+                    Icon::PinFilled
+                } else {
+                    Icon::Pin
+                },
+            ),
             (Hot::WindowMinimize, cap_min, Icon::Minimize),
             (
                 Hot::WindowFullscreen,
@@ -7437,12 +7895,17 @@ fn paint_frame(
             let fb = feedback(hot_key);
             paint_btn_lens_alpha(window, hot_key, wca);
             let (bcx, bcy) = box_r.centre();
+            let color = if hot_key == Hot::WindowPin && plan.always_on_top {
+                chrome::accent_rgb(plan.display.accent_hex, (0.94 + 0.06 * fb.hover) * wca)
+            } else {
+                chrome::text((0.78 + 0.22 * fb.hover) * wca)
+            };
             icons::paint_elastic(
                 window,
                 cx,
                 icon,
                 Box4::new(bcx - icon_d * 0.5, bcy - icon_d * 0.5, icon_d, icon_d),
-                chrome::text((0.78 + 0.22 * fb.hover) * wca),
+                color,
                 fb,
             );
         }
@@ -7450,9 +7913,9 @@ fn paint_frame(
     if let Some(badge) = plan.badge.as_ref() {
         let (w, _) = chrome::measure(window, badge, 11.0, 600.0);
         let shift = if matches!(plan.mode, Mode::Mini | Mode::Lyrics) {
-            84.0 * plan.window_controls_alpha
-        } else {
             110.0 * plan.window_controls_alpha
+        } else {
+            144.0 * plan.window_controls_alpha
         };
         let bx = m.win_w - w - 24.0 - shift;
         chrome::fill_round(window, bx - 8.0, 14.0, w + 16.0, 20.0, 6.0, chrome::text(0.10 * fg_alpha));
@@ -7479,36 +7942,17 @@ fn paint_frame(
                 panel.rect.width as f32,
                 panel.rect.height as f32,
             );
-            let radius = panel_radius;
-            let sidecar_alpha = match plan.display.theme_mode {
-                model::ThemeMode::Light => 0.88,
-                model::ThemeMode::Dark => 0.84,
-                model::ThemeMode::LiquidGlass => 0.29,
-            };
-            chrome::fill_round(
+            paint_sidecar_glass_frame(
                 window,
-                r.x,
-                r.y,
-                r.w,
-                r.h,
-                radius,
-                chrome::themed_surface(sidecar_alpha * panel.surface_alpha),
-            );
-            chrome::stroke_round(
-                window,
-                r.x,
-                r.y,
-                r.w,
-                r.h,
-                radius,
-                1.0,
-                chrome::themed_border(0.13 * panel.surface_alpha),
+                r,
+                panel_radius,
+                plan.display.theme_mode,
+                panel.surface_alpha,
             );
         } else {
             window.paint_custom_surface_with_scene(bounds, panel.surface, panel.snapshot, panel.hook);
         }
         let text = |alpha: f32| chrome::text(alpha*panel.content_alpha);
-        let accent = |alpha: f32| chrome::accent_rgb(plan.display.accent_hex, alpha*panel.content_alpha);
         match panel.kind {
             PanelKind::Thumb | PanelKind::SliderLens | PanelKind::ButtonLens | PanelKind::SegmentedLens | PanelKind::TabLens | PanelKind::Dropdown => {},
             PanelKind::Settings => {
@@ -7611,18 +8055,25 @@ fn paint_frame(
                         panel.content_alpha,
                     );
                 }
-                let row_count = if plan.show_media_row { 5 } else { 4 };
+                let row_count = if plan.show_media_row { 6 } else { 5 };
                 for i in 0..row_count {
                     let item = if plan.show_media_row {
                         match i {
                             0 => more_items[0],
                             1 => more_items[1],
                             2 => more_items[2],
-                            3 => input::MORE_MEDIA_LABEL,
+                            3 => input::MORE_DESKTOP_LABEL,
+                            4 => input::MORE_MEDIA_LABEL,
                             _ => more_items[3],
                         }
                     } else {
-                        more_items[i]
+                        match i {
+                            0 => more_items[0],
+                            1 => more_items[1],
+                            2 => more_items[2],
+                            3 => input::MORE_DESKTOP_LABEL,
+                            _ => more_items[3],
+                        }
                     };
                     let b = input::row_rect_count(r, i as u8, row_count);
                     let f = feedback(Hot::MoreRow(i as u8));
@@ -7646,7 +8097,8 @@ fn paint_frame(
                             0 => Icon::Sync,
                             1 => Icon::List,
                             2 => Icon::MotionCover,
-                            3 => Icon::Play,
+                            3 => Icon::DesktopLyrics,
+                            4 => Icon::Play,
                             _ => Icon::Settings,
                         }
                     } else {
@@ -7654,6 +8106,7 @@ fn paint_frame(
                             0 => Icon::Sync,
                             1 => Icon::List,
                             2 => Icon::MotionCover,
+                            3 => Icon::DesktopLyrics,
                             _ => Icon::Settings,
                         }
                     };
@@ -7676,49 +8129,27 @@ fn paint_frame(
                 }
             }
             PanelKind::Volume => {
-                let x = panel.rect.left as f32 + 14.0;
-                let right_x = panel.rect.left as f32 + panel.rect.width as f32 - 14.0;
-                let top = panel.rect.top as f32 + 12.0;
-                chrome::paint_text(window, "音量", x, top, 13.0, 600.0, text(0.9));
-                let status_str = plan.status.as_str();
-                let status_w = chrome::measure(window, status_str, 12.0, 600.0).0.min(96.0);
-                chrome::paint_text_fitted(
+                paint_volume_panel_contents(
                     window,
-                    status_str,
-                    (right_x - status_w).max(x + 48.0),
-                    top,
-                    96.0,
-                    12.0,
-                    600.0,
-                    text(0.72),
-                );
-                let f = (volume_value / 100.0).clamp(0.0, 1.0) as f32;
-                chrome::paint_slider(
-                    window,
-                    x,
-                    panel.rect.top as f32 + 62.0,
-                    panel.rect.width as f32 - 28.0,
-                    f,
-                    if plan.volume_enabled { accent(0.95) } else { text(0.35) },
-                    text(0.18),
-                    if plan.volume_enabled {feedback(Hot::VolumeTrack)} else {Feedback::default()},
+                    panel.rect,
+                    volume_value,
+                    plan.volume_enabled,
+                    plan.status.as_str(),
+                    plan.volume_label.as_str(),
+                    plan.display.accent_hex,
+                    feedback(Hot::VolumeTrack),
                     panel.content_alpha,
                 );
-                chrome::paint_text(window, plan.volume_label.as_str(), x, top+23.0, 11.0, 400.0, text(0.50));
-                let vf = feedback(Hot::VolumeTrack);
-                if plan.volume_enabled && vf.hover > 0.0 {
-                    chrome::stroke_round(window,x+(panel.rect.width as f32-28.0)*f-11.0,panel.rect.top as f32+51.0,22.0,22.0,11.0,1.0,accent(vf.hover*0.55));
-                }
             }
             PanelKind::Picker => {
                 let x=panel.rect.left as f32+14.;let top=panel.rect.top as f32;
                 let picker_title = match plan.picker_kind {
                     PickerKind::Media => "媒体",
-                    PickerKind::Cover => "封面",
+                    PickerKind::Cover => "封面状态",
                     PickerKind::Lyrics => "歌词版本",
                 };
-                chrome::paint_text(window,picker_title,x,top+12.,13.5,650.,text(0.95));
                 if plan.picker_kind == PickerKind::Cover {
+                    chrome::paint_text(window,picker_title,x,top+12.,13.5,650.,text(0.95));
                     let cover_rows = [
                         ("显示封面", Icon::CoverExpand, plan.display.show_cover, plan.cover_switch_fractions[0]),
                         ("动态封面", Icon::MotionCover, plan.display.motion_cover, plan.cover_switch_fractions[1]),
@@ -7765,171 +8196,26 @@ fn paint_frame(
                         );
                     }
                 } else {
-                if plan.picker_kind == PickerKind::Lyrics {
-                let import_box = picker_import_rect(panel.rect);
-                let imf = feedback(Hot::PickerImport);
-                if imf.hover > 0.01 || imf.press > 0.01 {
-                    let (icx, icy) = import_box.centre();
-                    chrome::fill_round(
+                    paint_lyrics_picker_contents(
                         window,
-                        icx - 12.0,
-                        icy - 12.0,
-                        24.0,
-                        24.0,
-                        12.0,
-                        text(0.08 * imf.hover + 0.06 * imf.press),
+                        cx,
+                        panel.rect,
+                        picker_title,
+                        plan.picker_kind == PickerKind::Lyrics,
+                        candidates,
+                        plan.picker_scroll_px,
+                        &plan.smart_switch_fractions,
+                        plan.picker_refresh_angle,
+                        plan.display.accent_hex,
+                        light_panel,
+                        panel.content_alpha,
+                        plan.track_title.as_str(),
+                        feedback(Hot::PickerImport),
+                        feedback(Hot::PickerRefresh),
+                        |i| feedback(Hot::Candidate(i)),
+                        |i| feedback(Hot::SmartTranslation(i)),
                     );
                 }
-                let (icx, icy) = import_box.centre();
-                icons::paint_elastic(
-                    window,
-                    cx,
-                    Icon::Plus,
-                    Box4::new(icx - 8.0, icy - 8.0, 16.0, 16.0),
-                    text(0.72 + 0.24 * imf.hover),
-                    imf,
-                );
-                let refresh_box = picker_refresh_rect(panel.rect);
-                let rf = feedback(Hot::PickerRefresh);
-                if rf.hover > 0.01 || rf.press > 0.01 {
-                    let (rcx, rcy) = refresh_box.centre();
-                    chrome::fill_round(
-                        window,
-                        rcx - 12.0,
-                        rcy - 12.0,
-                        24.0,
-                        24.0,
-                        12.0,
-                        text(0.08 * rf.hover + 0.06 * rf.press),
-                    );
-                }
-                let (rcx, rcy) = refresh_box.centre();
-                icons::paint_elastic_rotated(
-                    window,
-                    cx,
-                    Icon::Refresh,
-                    Box4::new(rcx - 8.0, rcy - 8.0, 16.0, 16.0),
-                    text(0.72 + 0.24 * rf.hover),
-                    rf,
-                    plan.picker_refresh_angle,
-                );
-                }
-                let capacity=(((panel.rect.height as f32-VERSION_HEADER)/VERSION_ROW).floor() as usize).min(4);
-                let paint_badge = |window: &mut Window, bx: f32, cy: f32, label: &str, bg: Hsla, border: Hsla, fg: Hsla| -> f32 {
-                    let tw = chrome::measure(window, label, 10.5, 600.).0;
-                    let bw = tw + 12.;
-                    let by = cy - 9.0;
-                    chrome::fill_round(window, bx, by, bw, 18., 5.5, bg);
-                    chrome::stroke_round(window, bx, by, bw, 18., 5.5, 0.85, border);
-                    chrome::paint_text_vcentred(window, label, bx + 6., cy, 10.5, 600., fg);
-                    bw + 5.
-                };
-                for (i,entry) in candidates.iter().enumerate().skip(plan.picker_start).take(capacity) {
-                    let y=top+VERSION_HEADER+(i-plan.picker_start) as f32*VERSION_ROW;
-                    let r=Box4::new(panel.rect.left as f32+8.,y,panel.rect.width as f32-16.,VERSION_ROW-4.);
-                    let f=feedback(Hot::Candidate(i));
-                if entry.selected {
-                    chrome::fill_round(window, r.x, r.y, r.w, r.h, 10.0, accent(0.11));
-                    chrome::stroke_round(window, r.x, r.y, r.w, r.h, 10.0, 1.25, accent(0.86));
-                } else if f.hover > 0.01 {
-                    chrome::fill_round(window, r.x, r.y, r.w, r.h, 10.0, text(0.045 * f.hover));
-                }
-                let ry = y;
-                let top_cy = ry + 16.5;
-                let title_alpha = if entry.selected { 0.98 } else { 0.88 + 0.12 * f.hover };
-                let sub_alpha = 0.54 + 0.18 * f.hover;
-                let has_smart_btn = !entry.has_translation && !entry.smart_translation_key.is_empty();
-                let check_w = if entry.selected { 22.0 } else { 0.0 };
-                let match_w = if entry.match_badge.is_empty() {
-                    0.0
-                } else {
-                    chrome::measure(window, &entry.match_badge, 11.5, 550.0).0 + 6.0
-                };
-                let top_right_reserve = check_w + match_w + 8.0;
-                let bot_right_reserve = if has_smart_btn { 104. } else { 8. };
-                let row_mask=ContentMask{bounds:gpui_kit::bounds(point(px(r.x+3.),px(r.y+3.)),size(px((r.w-6.).max(20.)),px(r.h-6.)))};
-                window.with_content_mask(Some(row_mask),|window|{
-                    let tx = x + 3.0;
-                    let title_max = (r.right() - top_right_reserve - tx).max(40.0);
-                    let title_w = chrome::measure(window, &entry.title, 13.5, 650.).0.min(title_max);
-                    chrome::paint_text_fitted_vcentred(window, &entry.title, tx, top_cy, title_max, 13.5, 650., text(title_alpha));
-                    let mut bx = tx + title_w + 8.;
-                    if entry.source == "custom" {
-                        bx += paint_badge(window, bx, top_cy, "本地", accent(0.18), accent(0.45), text(0.92));
-                    }
-                    if let Some(badge) = entry.timing_badge {
-                        let (bg, border, fg) = if badge == "逐字" {
-                            (accent(0.24), accent(0.58), text(0.96))
-                        } else if badge == "逐行" {
-                            (text(0.12), text(0.26), text(0.86))
-                        } else {
-                            (text(0.08), text(0.18), text(0.66))
-                        };
-                        bx += paint_badge(window, bx, top_cy, badge, bg, border, fg);
-                    }
-                    if entry.has_translation {
-                        let green = Hsla::from(rgb(0x30D158)).opacity((if light_panel { 0.14 } else { 0.20 }) * panel.content_alpha);
-                        let green_border = Hsla::from(rgb(0x30D158)).opacity((if light_panel { 0.38 } else { 0.52 }) * panel.content_alpha);
-                        let green_text = Hsla::from(rgb(if light_panel { 0x15692C } else { 0x7CE89A })).opacity(0.94 * panel.content_alpha);
-                        paint_badge(window, bx, top_cy, "翻译", green, green_border, green_text);
-                    }
-                    let sub_max_w = (r.right() - bot_right_reserve - tx - 4.).max(40.);
-                    chrome::paint_text_fitted_vcentred(window,&entry.subtitle,tx,ry+40.0,sub_max_w,11.,450.,text(sub_alpha));
-                });
-                if !entry.match_badge.is_empty() {
-                    let mx = r.right() - 8.0 - check_w - (match_w - 6.0);
-                    chrome::paint_text_vcentred(window, &entry.match_badge, mx, top_cy, 11.5, 550., text(0.58));
-                }
-                if entry.selected {
-                    let cx_chk = r.right() - 22.0;
-                    let cy_chk = top_cy - 8.0;
-                    chrome::fill_round(window, cx_chk, cy_chk, 16.0, 16.0, 8.0, accent(0.95));
-                    chrome::paint_text_box_centred(window, "✓", Box4::new(cx_chk, cy_chk, 16.0, 16.0), 11.0, 700., Hsla::from(rgb(0xFFFFFF)).opacity(0.98 * panel.content_alpha));
-                }
-                    if has_smart_btn {
-                        let btn = picker_smart_btn_rect(r);
-                        let sf = feedback(Hot::SmartTranslation(i));
-                        let on = entry.smart_translation;
-                        let frac = plan
-                            .smart_switch_fractions
-                            .iter()
-                            .find(|(k, _)| k == &entry.smart_translation_key)
-                            .map(|(_, v)| *v)
-                            .unwrap_or(if on { 1.0 } else { 0.0 });
-                        let label_alpha = if on { 0.88 } else { 0.56 + 0.20 * sf.hover };
-                        chrome::paint_text(window, "智能翻译", btn.x, btn.y + 3.5, 11.0, 500., text(label_alpha));
-                        chrome::paint_switch_with_accent(
-                            window,
-                            btn.right() - 34.0,
-                            btn.y + 1.5,
-                            34.0,
-                            19.0,
-                            on,
-                            frac,
-                            sf,
-                            plan.display.accent_hex,
-                            panel.content_alpha,
-                        );
-                    }
-                }
-                if capacity > 0 && candidates.len() > capacity {
-                    let track_x = panel.rect.left as f32 + panel.rect.width as f32 - 6.0;
-                    let track_y = top + VERSION_HEADER + 2.0;
-                    let track_h = (capacity as f32 * VERSION_ROW - 8.0).max(16.0);
-                    let thumb_h = ((capacity as f32 / candidates.len() as f32) * track_h).max(18.0);
-                    let max_start = candidates.len().saturating_sub(capacity).max(1) as f32;
-                    let frac = (plan.picker_start as f32 / max_start).clamp(0.0, 1.0);
-                    let thumb_y = track_y + (track_h - thumb_h) * frac;
-                    chrome::fill_round(window, track_x, track_y, 3.0, track_h, 1.5, text(0.08));
-                    chrome::fill_round(window, track_x, thumb_y, 3.0, thumb_h, 1.5, text(0.32));
-                }
-                if capacity==0 && !candidates.is_empty(){chrome::paint_text(window,"当前空间不足，请调大窗口或切换模式",x,top+VERSION_HEADER+5.,11.,500.,text(0.55));}
-                if candidates.is_empty(){
-                    let empty_msg = if plan.track_title == "未在播放" { "未在播放" } else { "暂无匹配歌词" };
-                    chrome::paint_text(window,empty_msg,x,top+VERSION_HEADER+12.,12.,500.,text(0.55));
-                }
-                }
-
             }
             PanelKind::Island => {}
         }
@@ -7969,6 +8255,319 @@ fn panel_anchor_hint(r: Box4) -> f32 {
     r.y
 }
 
+pub(super) fn paint_sidecar_glass_frame(
+    window: &mut Window,
+    r: Box4,
+    radius: f32,
+    theme_mode: model::ThemeMode,
+    surface_alpha: f32,
+) {
+    let sidecar_alpha = match theme_mode {
+        model::ThemeMode::Light => 0.88,
+        model::ThemeMode::Dark => 0.84,
+        model::ThemeMode::LiquidGlass => 0.29,
+    };
+    chrome::fill_round(
+        window,
+        r.x,
+        r.y,
+        r.w,
+        r.h,
+        radius,
+        chrome::themed_surface(sidecar_alpha * surface_alpha),
+    );
+    chrome::stroke_round(
+        window,
+        r.x,
+        r.y,
+        r.w,
+        r.h,
+        radius,
+        1.0,
+        chrome::themed_border(0.16 * surface_alpha),
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn paint_volume_panel_contents(
+    window: &mut Window,
+    panel_rect: GlassRect,
+    volume_value: f64,
+    volume_enabled: bool,
+    status_str: &str,
+    volume_label: &str,
+    accent_hex: u32,
+    track_feedback: Feedback,
+    content_alpha: f32,
+) {
+    let text = |alpha: f32| chrome::text(alpha * content_alpha);
+    let accent = |alpha: f32| chrome::accent_rgb(accent_hex, alpha * content_alpha);
+    let x = panel_rect.left as f32 + 14.0;
+    let right_x = panel_rect.left as f32 + panel_rect.width as f32 - 14.0;
+    let top = panel_rect.top as f32 + 12.0;
+    chrome::paint_text(window, "音量", x, top, 13.0, 600.0, text(0.9));
+    let status_w = chrome::measure(window, status_str, 12.0, 600.0).0.min(96.0);
+    chrome::paint_text_fitted(
+        window,
+        status_str,
+        (right_x - status_w).max(x + 48.0),
+        top,
+        96.0,
+        12.0,
+        600.0,
+        text(0.72),
+    );
+    let f = (volume_value / 100.0).clamp(0.0, 1.0) as f32;
+    chrome::paint_slider(
+        window,
+        x,
+        panel_rect.top as f32 + 62.0,
+        panel_rect.width as f32 - 28.0,
+        f,
+        if volume_enabled { accent(0.95) } else { text(0.35) },
+        text(0.18),
+        if volume_enabled {
+            track_feedback
+        } else {
+            Feedback::default()
+        },
+        content_alpha,
+    );
+    chrome::paint_text(window, volume_label, x, top + 23.0, 11.0, 400.0, text(0.50));
+    if volume_enabled && track_feedback.hover > 0.0 {
+        chrome::stroke_round(
+            window,
+            x + (panel_rect.width as f32 - 28.0) * f - 11.0,
+            panel_rect.top as f32 + 51.0,
+            22.0,
+            22.0,
+            11.0,
+            1.0,
+            accent(track_feedback.hover * 0.55),
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn paint_lyrics_picker_contents(
+    window: &mut Window,
+    cx: &App,
+    panel_rect: GlassRect,
+    picker_title: &str,
+    show_lyrics_actions: bool,
+    candidates: &[PickerEntry],
+    picker_scroll_px: f32,
+    smart_switch_fractions: &[(String, f32)],
+    picker_refresh_angle: f32,
+    accent_hex: u32,
+    light_panel: bool,
+    content_alpha: f32,
+    track_title: &str,
+    import_fb: Feedback,
+    refresh_fb: Feedback,
+    candidate_fb: impl Fn(usize) -> Feedback,
+    smart_fb: impl Fn(usize) -> Feedback,
+) {
+    let text = |alpha: f32| chrome::text(alpha * content_alpha);
+    let accent = |alpha: f32| chrome::accent_rgb(accent_hex, alpha * content_alpha);
+    let x = panel_rect.left as f32 + 14.0;
+    let top = panel_rect.top as f32;
+    chrome::paint_text(window, picker_title, x, top + 12.0, 13.5, 650.0, text(0.95));
+    if show_lyrics_actions {
+        let import_box = picker_import_rect(panel_rect);
+        if import_fb.hover > 0.01 || import_fb.press > 0.01 {
+            let (icx, icy) = import_box.centre();
+            chrome::fill_round(
+                window,
+                icx - 12.0,
+                icy - 12.0,
+                24.0,
+                24.0,
+                12.0,
+                text(0.08 * import_fb.hover + 0.06 * import_fb.press),
+            );
+        }
+        let (icx, icy) = import_box.centre();
+        icons::paint_elastic(
+            window,
+            cx,
+            Icon::Plus,
+            Box4::new(icx - 8.0, icy - 8.0, 16.0, 16.0),
+            text(0.72 + 0.24 * import_fb.hover),
+            import_fb,
+        );
+        let refresh_box = picker_refresh_rect(panel_rect);
+        if refresh_fb.hover > 0.01 || refresh_fb.press > 0.01 {
+            let (rcx, rcy) = refresh_box.centre();
+            chrome::fill_round(
+                window,
+                rcx - 12.0,
+                rcy - 12.0,
+                24.0,
+                24.0,
+                12.0,
+                text(0.08 * refresh_fb.hover + 0.06 * refresh_fb.press),
+            );
+        }
+        let (rcx, rcy) = refresh_box.centre();
+        icons::paint_elastic_rotated(
+            window,
+            cx,
+            Icon::Refresh,
+            Box4::new(rcx - 8.0, rcy - 8.0, 16.0, 16.0),
+            text(0.72 + 0.24 * refresh_fb.hover),
+            refresh_fb,
+            picker_refresh_angle,
+        );
+    }
+    let capacity = (((panel_rect.height as f32 - VERSION_HEADER) / VERSION_ROW).floor() as usize).min(4);
+    let paint_badge = |window: &mut Window, bx: f32, cy: f32, label: &str, bg: Hsla, border: Hsla, fg: Hsla| -> f32 {
+        let tw = chrome::measure(window, label, 10.5, 600.0).0;
+        let bw = tw + 12.0;
+        let by = cy - 9.0;
+        chrome::fill_round(window, bx, by, bw, 18.0, 5.5, bg);
+        chrome::stroke_round(window, bx, by, bw, 18.0, 5.5, 0.85, border);
+        chrome::paint_text_vcentred(window, label, bx + 6.0, cy, 10.5, 600.0, fg);
+        bw + 5.0
+    };
+    let list_top = top + VERSION_HEADER;
+    let list_h = (capacity as f32 * VERSION_ROW).max(0.0);
+    let list_bot = list_top + list_h;
+    let max_scroll_px = (candidates.len().saturating_sub(capacity) as f32 * VERSION_ROW).max(0.0);
+    let scroll_px = picker_scroll_px.clamp(0.0, max_scroll_px);
+    window.with_content_mask(
+        Some(ContentMask {
+            bounds: gpui_kit::bounds(
+                point(px(panel_rect.left as f32), px(list_top)),
+                gpui_kit::size(px(panel_rect.width as f32), px(list_h)),
+            ),
+        }),
+        |window| {
+    for (i, entry) in candidates.iter().enumerate() {
+        let y = list_top + i as f32 * VERSION_ROW - scroll_px;
+        if y + VERSION_ROW < list_top - 4.0 || y > list_bot + 4.0 {
+            continue;
+        }
+        let r = Box4::new(
+            panel_rect.left as f32 + 8.0,
+            y,
+            panel_rect.width as f32 - 16.0,
+            VERSION_ROW - 4.0,
+        );
+        let f = candidate_fb(i);
+        if entry.selected {
+            chrome::fill_round(window, r.x, r.y, r.w, r.h, 10.0, accent(0.11));
+            chrome::stroke_round(window, r.x, r.y, r.w, r.h, 10.0, 1.25, accent(0.86));
+        } else if f.hover > 0.01 {
+            chrome::fill_round(window, r.x, r.y, r.w, r.h, 10.0, text(0.045 * f.hover));
+        }
+        let ry = y;
+        let top_cy = ry + 16.5;
+        let title_alpha = if entry.selected { 0.98 } else { 0.88 + 0.12 * f.hover };
+        let sub_alpha = 0.54 + 0.18 * f.hover;
+        let has_smart_btn = !entry.has_translation && !entry.smart_translation_key.is_empty();
+        let check_w = if entry.selected { 22.0 } else { 0.0 };
+        let match_w = if entry.match_badge.is_empty() {
+            0.0
+        } else {
+            chrome::measure(window, &entry.match_badge, 11.5, 550.0).0 + 6.0
+        };
+        let top_right_reserve = check_w + match_w + 8.0;
+        let bot_right_reserve = if has_smart_btn { 104.0 } else { 8.0 };
+        let row_mask = ContentMask {
+            bounds: gpui_kit::bounds(
+                point(px(r.x + 3.0), px(r.y + 3.0)),
+                size(px((r.w - 6.0).max(20.0)), px(r.h - 6.0)),
+            ),
+        };
+        window.with_content_mask(Some(row_mask), |window| {
+            let tx = x + 3.0;
+            let title_max = (r.right() - top_right_reserve - tx).max(40.0);
+            let title_w = chrome::measure(window, &entry.title, 13.5, 650.0).0.min(title_max);
+            chrome::paint_text_fitted_vcentred(window, &entry.title, tx, top_cy, title_max, 13.5, 650.0, text(title_alpha));
+            let mut bx = tx + title_w + 8.0;
+            if entry.source == "custom" {
+                bx += paint_badge(window, bx, top_cy, "本地", accent(0.18), accent(0.45), text(0.92));
+            }
+            if let Some(badge) = entry.timing_badge {
+                let (bg, border, fg) = if badge == "逐字" {
+                    (accent(0.24), accent(0.58), text(0.96))
+                } else if badge == "逐行" {
+                    (text(0.12), text(0.26), text(0.86))
+                } else {
+                    (text(0.08), text(0.18), text(0.66))
+                };
+                bx += paint_badge(window, bx, top_cy, badge, bg, border, fg);
+            }
+            if entry.has_translation {
+                let green = Hsla::from(rgb(0x30D158)).opacity((if light_panel { 0.14 } else { 0.20 }) * content_alpha);
+                let green_border = Hsla::from(rgb(0x30D158)).opacity((if light_panel { 0.38 } else { 0.52 }) * content_alpha);
+                let green_text = Hsla::from(rgb(if light_panel { 0x15692C } else { 0x7CE89A })).opacity(0.94 * content_alpha);
+                paint_badge(window, bx, top_cy, "翻译", green, green_border, green_text);
+            }
+            let sub_max_w = (r.right() - bot_right_reserve - tx - 4.0).max(40.0);
+            chrome::paint_text_fitted_vcentred(window, &entry.subtitle, tx, ry + 40.0, sub_max_w, 11.0, 450.0, text(sub_alpha));
+        });
+        if !entry.match_badge.is_empty() {
+            let mx = r.right() - 8.0 - check_w - (match_w - 6.0);
+            chrome::paint_text_vcentred(window, &entry.match_badge, mx, top_cy, 11.5, 550.0, text(0.58));
+        }
+        if entry.selected {
+            let cx_chk = r.right() - 22.0;
+            let cy_chk = top_cy - 8.0;
+            chrome::fill_round(window, cx_chk, cy_chk, 16.0, 16.0, 8.0, accent(0.95));
+            chrome::paint_text_box_centred(window, "✓", Box4::new(cx_chk, cy_chk, 16.0, 16.0), 11.0, 700.0, Hsla::from(rgb(0xFFFFFF)).opacity(0.98 * content_alpha));
+        }
+        if has_smart_btn {
+            let btn = picker_smart_btn_rect(r);
+            let sf = smart_fb(i);
+            let on = entry.smart_translation;
+            let frac = smart_switch_fractions
+                .iter()
+                .find(|(k, _)| k == &entry.smart_translation_key)
+                .map(|(_, v)| *v)
+                .unwrap_or(if on { 1.0 } else { 0.0 });
+            let label_alpha = if on { 0.88 } else { 0.56 + 0.20 * sf.hover };
+            chrome::paint_text(window, "智能翻译", btn.x, btn.y + 3.5, 11.0, 500.0, text(label_alpha));
+            chrome::paint_switch_with_accent(
+                window,
+                btn.right() - 34.0,
+                btn.y + 1.5,
+                34.0,
+                19.0,
+                on,
+                frac,
+                sf,
+                accent_hex,
+                content_alpha,
+            );
+        }
+    }
+        },
+    );
+    if capacity > 0 && candidates.len() > capacity {
+        let track_x = panel_rect.left as f32 + panel_rect.width as f32 - 6.0;
+        let track_y = top + VERSION_HEADER + 2.0;
+        let track_h = (capacity as f32 * VERSION_ROW - 8.0).max(16.0);
+        let thumb_h = ((capacity as f32 / candidates.len() as f32) * track_h).max(18.0);
+        let frac = if max_scroll_px > 0.5 {
+            (scroll_px / max_scroll_px).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let thumb_y = track_y + (track_h - thumb_h) * frac;
+        chrome::fill_round(window, track_x, track_y, 3.0, track_h, 1.5, text(0.08));
+        chrome::fill_round(window, track_x, thumb_y, 3.0, thumb_h, 1.5, text(0.32));
+    }
+    if capacity == 0 && !candidates.is_empty() {
+        chrome::paint_text(window, "当前空间不足，请调大窗口或切换模式", x, top + VERSION_HEADER + 5.0, 11.0, 500.0, text(0.55));
+    }
+    if candidates.is_empty() {
+        let empty_msg = if track_title == "未在播放" { "未在播放" } else { "暂无匹配歌词" };
+        chrome::paint_text(window, empty_msg, x, top + VERSION_HEADER + 12.0, 12.0, 500.0, text(0.55));
+    }
+}
+
 #[cfg(test)]
 mod liquid_hit_tests {
     use super::*;
@@ -7999,7 +8598,7 @@ fn any_lyric_source_enabled(config: &serde_json::Value) -> bool {
 
 #[cfg(test)]mod input_timeline_tests {
  use super::*;
- #[::std::prelude::v1::test]fn fixture_source_survives_the_render_document_projection(){let path=std::env::temp_dir().join(format!("oly-fixture-test-{}.json",std::process::id()));std::fs::write(&path,r#"{"doc":{"provider":"kugou","lines":[{"text":"Sample line","start":1000,"end":3000}]}}"#).unwrap();let(doc,provider)=load_fixture(&path).unwrap();let _=std::fs::remove_file(&path);assert_eq!(provider,"kugou");assert!(!doc.lines.is_empty());}
+ #[::std::prelude::v1::test]fn fixture_source_survives_the_render_document_projection(){let path=std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/lyrics/hard-times.json");let(doc,provider)=load_fixture(&path).unwrap();assert_eq!(provider,"kugou");assert!(!doc.lines.is_empty());}
  #[::std::prelude::v1::test]fn sync_labels_follow_the_original_direction(){assert_eq!(offset_label(0),"0ms");assert_eq!(offset_label(200),"+200ms");assert_eq!(offset_label(-200),"-200ms");}
 }
 
@@ -8079,14 +8678,14 @@ mod window_lyrics_toggle_tests {
 
     #[::std::prelude::v1::test]
     fn caption_rects_fit_window_and_compact_modes() {
-        let (w_zone, [w_min, w_fs, w_close]) = window_caption_rects(1280.0, false);
-        assert!(w_min.x < w_fs.x && w_fs.x < w_close.x);
-        assert!(w_close.right() <= 1280.0 && w_zone.contains(w_close.centre().0, w_close.centre().1));
+        let (w_zone, [w_pin, w_min, w_fs, w_close]) = window_caption_rects(1280.0, false);
+        assert!(w_pin.x < w_min.x && w_min.x < w_fs.x && w_fs.x < w_close.x);
+        assert!(w_close.right() <= 1280.0 && w_zone.contains(w_pin.centre().0, w_pin.centre().1) && w_zone.contains(w_close.centre().0, w_close.centre().1));
         assert_eq!(w_min.w, 28.0);
 
-        let (c_zone, [c_min, c_fs, c_close]) = window_caption_rects(380.0, true);
-        assert!(c_min.x < c_fs.x && c_fs.x < c_close.x);
-        assert!(c_close.right() <= 380.0 && c_zone.contains(c_close.centre().0, c_close.centre().1));
+        let (c_zone, [c_pin, c_min, c_fs, c_close]) = window_caption_rects(380.0, true);
+        assert!(c_pin.x < c_min.x && c_min.x < c_fs.x && c_fs.x < c_close.x);
+        assert!(c_close.right() <= 380.0 && c_zone.contains(c_pin.centre().0, c_pin.centre().1) && c_zone.contains(c_close.centre().0, c_close.centre().1));
         assert!(c_min.w < w_min.w && c_min.h < w_min.h);
     }
 }

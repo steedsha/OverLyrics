@@ -111,7 +111,7 @@ pub fn ui_font(weight: f32) -> Font {
     font
 }
 
-fn text_run(len: usize, weight: f32, color: Hsla) -> TextRun {
+pub fn text_run(len: usize, weight: f32, color: Hsla) -> TextRun {
     TextRun {
         len,
         font: ui_font(weight),
@@ -1501,12 +1501,37 @@ pub fn paint_choice_pill(
     paint_choice_pill_state(window, r, label, false, ACCENT_HEX, f, opacity);
 }
 
+/// Arrow direction for `paint_choice_pill_with_arrow`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChoiceArrow {
+    Down,
+    Up,
+    Right,
+    Left,
+}
+
 /// Paints a tactile liquid glass choice pill (`Control::Choice`) with open/closed dropdown state.
 pub fn paint_choice_pill_state(
     window: &mut Window,
     r: super::model::Box4,
     label: &str,
     open: bool,
+    accent_hex: u32,
+    f: super::interaction::Feedback,
+    opacity: f32,
+) {
+    let arrow = if open { ChoiceArrow::Up } else { ChoiceArrow::Down };
+    paint_choice_pill_with_arrow(window, r, label, open, arrow, accent_hex, f, opacity);
+}
+
+/// Paints a tactile liquid glass choice pill with an explicit arrow direction.
+#[allow(clippy::too_many_arguments)]
+pub fn paint_choice_pill_with_arrow(
+    window: &mut Window,
+    r: super::model::Box4,
+    label: &str,
+    open: bool,
+    arrow: ChoiceArrow,
     accent_hex: u32,
     f: super::interaction::Feedback,
     opacity: f32,
@@ -1547,13 +1572,13 @@ pub fn paint_choice_pill_state(
         550.0,
         text((0.92 + 0.06 * f.hover).min(1.0) * opacity),
     );
-    chevron_vertical(
-        window,
-        x + w - 18.0,
-        y + 11.5 + 1.2 * press,
-        open,
-        text((0.56 + 0.32 * f.hover) * opacity),
-    );
+    let arrow_col = text((0.56 + 0.32 * f.hover) * opacity);
+    match arrow {
+        ChoiceArrow::Down => chevron_vertical(window, x + w - 18.0, y + 11.5 + 1.2 * press, false, arrow_col),
+        ChoiceArrow::Up => chevron_vertical(window, x + w - 18.0, y + 11.5 + 1.2 * press, true, arrow_col),
+        ChoiceArrow::Right => chevron_horizontal(window, x + w - 16.0, y + 10.0 + 1.2 * press, true, arrow_col),
+        ChoiceArrow::Left => chevron_horizontal(window, x + w - 16.0, y + 10.0 + 1.2 * press, false, arrow_col),
+    }
 }
 
 /// Paints a single liquid glass option row inside a dropdown list or version picker.
@@ -1592,6 +1617,22 @@ pub fn chevron_vertical(window: &mut Window, x: f32, y: f32, up: bool, color: Hs
         p.move_to(point(px(x), px(y + 1.0)));
         p.line_to(point(px(x + 4.0), px(y + 5.0)));
         p.line_to(point(px(x + 8.0), px(y + 1.0)));
+    }
+    if let Ok(path) = p.build() {
+        window.paint_path(path, color);
+    }
+}
+
+pub fn chevron_horizontal(window: &mut Window, x: f32, y: f32, right: bool, color: Hsla) {
+    let mut p = PathBuilder::stroke(px(1.5));
+    if right {
+        p.move_to(point(px(x + 1.0), px(y)));
+        p.line_to(point(px(x + 5.0), px(y + 4.0)));
+        p.line_to(point(px(x + 1.0), px(y + 8.0)));
+    } else {
+        p.move_to(point(px(x + 5.0), px(y)));
+        p.line_to(point(px(x + 1.0), px(y + 4.0)));
+        p.line_to(point(px(x + 5.0), px(y + 8.0)));
     }
     if let Ok(path) = p.build() {
         window.paint_path(path, color);

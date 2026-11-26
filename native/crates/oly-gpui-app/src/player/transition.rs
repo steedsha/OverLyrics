@@ -285,17 +285,19 @@ impl ModeTransition {
                 let eased = quintic(p);
                 let bounds = interpolate_bounds(self.from_bounds, self.to_bounds, eased);
                 self.current_bounds = bounds;
-                let split: f32 = if self.from_bounds.h < self.to_bounds.h {
-                    0.38
-                } else {
-                    0.26
-                };
-                let (render_shape, chrome_alpha) = if p < split {
-                    (self.from_shape, (1.0 - p / split).clamp(0.0, 1.0))
+                const FADE_OUT_END: f32 = 0.18;
+                const FADE_IN_START: f32 = 0.76;
+                let (render_shape, chrome_alpha) = if p < FADE_OUT_END {
+                    (self.from_shape, (1.0 - p / FADE_OUT_END).clamp(0.0, 1.0))
+                } else if p < FADE_IN_START {
+                    (
+                        if p < 0.45 { self.from_shape } else { self.to_shape },
+                        0.0,
+                    )
                 } else {
                     (
                         self.to_shape,
-                        quintic(((p - split) / (1.0 - split)).clamp(0.0, 1.0)),
+                        quintic(((p - FADE_IN_START) / (1.0 - FADE_IN_START)).clamp(0.0, 1.0)),
                     )
                 };
                 let finished = p >= 1.0;
@@ -587,7 +589,7 @@ mod tests {
         assert_eq!(start.render_mode, Mode::Mini);
         assert!(!start.finished);
 
-        let fade_old = tr.step(1050.0, false);
+        let fade_old = tr.step(1040.0, false);
         assert_eq!(fade_old.content_alpha, 1.0);
         assert_eq!(fade_old.render_mode, Mode::Mini);
         assert!(fade_old.chrome_alpha < 0.7);
@@ -597,7 +599,11 @@ mod tests {
         assert_eq!(mid.render_mode, Mode::Lyrics);
         let b = mid.bounds.unwrap();
         assert!((b.h - 413.0).abs() < 1.0);
-        assert!(mid.chrome_alpha > 0.0 && mid.chrome_alpha < 1.0);
+        assert_eq!(mid.chrome_alpha, 0.0);
+
+        let fade_in = tr.step(1340.0, false);
+        assert_eq!(fade_in.render_mode, Mode::Lyrics);
+        assert!(fade_in.chrome_alpha > 0.0 && fade_in.chrome_alpha < 1.0);
 
         let end = tr.step(1380.0, false);
         assert!(end.finished);

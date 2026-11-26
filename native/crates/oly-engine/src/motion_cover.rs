@@ -42,6 +42,17 @@ static SINGLE_EP_RE: LazyLock<Regex> =
 static EDITION_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\s*[（(]\s*(deluxe|explicit|clean)[^)）]*[)）]\s*$").expect("edition regex")
 });
+static PAREN_SUBTITLE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\s*[（(]([^()（）]+)[)）]\s*$").expect("paren subtitle regex")
+});
+static VERSION_TAG_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(live|remix|remixes|acoustic|instrumental|karaoke|cover|demo|sped\s+up|slowed)\b|现场|現場|版")
+        .expect("version tag regex")
+});
+static NON_STUDIO_ALBUM_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(live|remix|remixes|acoustic|instrumental|soundtrack|ost|greatest\s+hits|best\s+of|karaoke|tribute|cover|anthology|collection|highlights|essential)\b|演唱会|現場|现场|精选|精選|原声|原聲")
+        .expect("non-studio album regex")
+});
 static FEAT_TAIL_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\s+(?:feat\.?|ft\.?|featuring)\s+.+$").expect("feat regex"));
 static ARTIST_SPLIT_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -235,6 +246,44 @@ pub fn strip_suffix(value: &str) -> String {
 pub fn title_key(value: &str) -> String {
     let stripped = strip_suffix(value);
     FEAT_TAIL_RE.replace(&stripped, "").trim().to_string()
+}
+
+fn base_title_key(value: &str) -> String {
+    let trimmed = value.trim();
+    if let Some(caps) = PAREN_SUBTITLE_RE.captures(trimmed) {
+        let inner = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+        if !VERSION_TAG_RE.is_match(inner) {
+            let without_sub = PAREN_SUBTITLE_RE.replace(trimmed, "");
+            return title_key(&without_sub);
+        }
+    }
+    title_key(trimmed)
+}
+
+fn title_matches(cand_title: &str, wanted_title: &str) -> bool {
+    let wt = title_key(wanted_title);
+    if wt.is_empty() {
+        return false;
+    }
+    if title_key(cand_title) == wt {
+        return true;
+    }
+    let wb = base_title_key(wanted_title);
+    !wb.is_empty() && base_title_key(cand_title) == wb
+}
+
+fn is_single_or_self_titled(album: &str, title: &str) -> bool {
+    let trimmed = album.trim();
+    if trimmed.is_empty() || SINGLE_EP_RE.is_match(trimmed) {
+        return true;
+    }
+    let al = strip_suffix(trimmed);
+    let tk = title_key(title);
+    !al.is_empty() && !tk.is_empty() && al == tk
+}
+
+fn is_non_studio_album(album: &str) -> bool {
+    NON_STUDIO_ALBUM_RE.is_match(album)
 }
 
 fn fold_latin_accents(value: &str) -> String {
@@ -749,9 +798,56 @@ impl<S: MotionStore> MotionCoverResolver<S> {
             ["jp", "us"]
         };
 
+        let allow_single_fallback = is_single_or_self_titled(album, title);
         let mut all_hits: Vec<(&'static str, SearchHit)> = Vec::new();
         let mut any_search_failed = false;
         let mut all_search_failed = true;
+
+        let pick_from = |hits: &[(&'static str, SearchHit)]| -> (
+            Vec<(i32, &'static str, SearchHit, String)>,
+            Vec<(i32, &'static str, SearchHit, String)>,
+        ) {
+            let mut strict: Vec<(i32, &'static str, SearchHit, String)> = Vec::new();
+            let mut fallback: Vec<(i32, &'static str, SearchHit, String)> = Vec::new();
+            for (country, hit) in hits {
+                let Some(cid) = collection_id_string(hit.collection_id.as_ref()) else {
+                    continue;
+                };
+                let cand_title = hit.track_name.as_deref().unwrap_or("");
+                let cand_artist = hit.artist_name.as_deref().unwrap_or("");
+                let cand_album = hit.collection_name.as_deref().unwrap_or("");
+                let s = score_of(cand_title, cand_artist, cand_album, title, artist, album);
+                if s < MIN_SCORE || !title_matches(cand_title, title) {
+                    continue;
+                }
+                if same_artist_album(cand_artist, cand_album, artist, album) {
+                    strict.push((s, *country, hit.clone(), cid));
+                } else if allow_single_fallback
+                    && !is_non_studio_album(cand_album)
+                    && same_artist_album(cand_artist, cand_album, artist, "")
+                {
+                    fallback.push((s, *country, hit.clone(), cid));
+                }
+            }
+            strict.sort_by(|a, b| b.0.cmp(&a.0));
+            fallback.sort_by(|a, b| b.0.cmp(&a.0));
+            let dedup = |items: Vec<(i32, &'static str, SearchHit, String)>, limit: usize| {
+                let mut seen = HashSet::new();
+                let mut out = Vec::new();
+                for item in items {
+                    if seen.insert(item.3.clone()) {
+                        out.push(item);
+                        if out.len() >= limit {
+                            break;
+                        }
+                    }
+                }
+                out
+            };
+            (dedup(strict, TRY_CANDIDATES), dedup(fallback, 2))
+        };
+
+        let mut picks = Vec::new();
         for country in countries {
             let url = format!(
                 "https://itunes.apple.com/search?term={}&entity=song&limit={SEARCH_LIMIT}&country={country}",
@@ -763,6 +859,15 @@ impl<S: MotionStore> MotionCoverResolver<S> {
                 Ok(parsed) => {
                     all_search_failed = false;
                     all_hits.extend(parsed.results.into_iter().map(|hit| (country, hit)));
+                    let (strict, fallback) = pick_from(&all_hits);
+                    if !strict.is_empty() {
+                        picks = strict;
+                        break;
+                    }
+                    if !fallback.is_empty() {
+                        picks = fallback;
+                        break;
+                    }
                 }
                 Err(_) => {
                     any_search_failed = true;
@@ -772,41 +877,7 @@ impl<S: MotionStore> MotionCoverResolver<S> {
         if all_search_failed {
             return MotionResult::fail("search-error");
         }
-        if all_hits.is_empty() {
-            return MotionResult::fail("no-match");
-        }
-
-        let mut scored: Vec<(i32, &'static str, SearchHit, String)> = all_hits
-            .into_iter()
-            .filter_map(|(country, hit)| {
-                let cid = collection_id_string(hit.collection_id.as_ref())?;
-                let cand_title = hit.track_name.as_deref().unwrap_or("");
-                let cand_artist = hit.artist_name.as_deref().unwrap_or("");
-                let cand_album = hit.collection_name.as_deref().unwrap_or("");
-                let s = score_of(cand_title, cand_artist, cand_album, title, artist, album);
-                if s >= MIN_SCORE
-                    && title_key(cand_title) == title_key(title)
-                    && same_artist_album(cand_artist, cand_album, artist, album)
-                {
-                    Some((s, country, hit, cid))
-                } else {
-                    None
-                }
-            })
-            .collect();
-        scored.sort_by(|a, b| b.0.cmp(&a.0));
-
-        let mut seen = HashSet::new();
-        let mut picks = Vec::new();
-        for (score, country, hit, cid) in scored {
-            if seen.insert(cid.clone()) {
-                picks.push((score, country, hit, cid));
-                if picks.len() >= TRY_CANDIDATES {
-                    break;
-                }
-            }
-        }
-        if picks.is_empty() {
+        if all_hits.is_empty() || picks.is_empty() {
             return MotionResult::fail("no-match");
         }
 
@@ -1140,5 +1211,112 @@ mod tests {
         let cleared = resolver.clear_cache();
         assert_eq!(cleared.count, 1);
         assert_eq!(resolver.stats().count, 0);
+    }
+
+    #[test]
+    fn single_falls_back_to_studio_album_and_short_circuits_second_country() {
+        let mut responses = HashMap::new();
+        let search_json = serde_json::json!({
+            "results": [
+                {
+                    "collectionId": 1542842760,
+                    "trackName": "Blinding Lights (Remix)",
+                    "artistName": "The Weeknd & ROSALÍA",
+                    "collectionName": "Blinding Lights (Remix) - Single"
+                },
+                {
+                    "collectionId": 1499378108,
+                    "trackName": "Blinding Lights",
+                    "artistName": "The Weeknd",
+                    "collectionName": "After Hours"
+                }
+            ]
+        })
+        .to_string();
+        responses.insert(
+            format!(
+                "https://itunes.apple.com/search?term={}&entity=song&limit=10&country=us",
+                net::encode_component("Blinding Lights The Weeknd")
+            ),
+            search_json,
+        );
+        responses.insert(
+            "https://music.apple.com/cn/album/x/1499378108".into(),
+            r#"{"motionDetailSquare":{"previewFrame":{},"video":"https:\/\/example.com\/ah\/master.m3u8"}}"#.into(),
+        );
+        responses.insert(
+            "https://example.com/ah/master.m3u8".into(),
+            "#EXT-X-STREAM-INF:BANDWIDTH=3000000,RESOLUTION=1080x1080,CODECS=\"avc1.640028\"\n1080.m3u8\n"
+                .into(),
+        );
+        responses.insert(
+            "https://example.com/ah/1080.m3u8".into(),
+            "#EXT-X-MAP:URI=\"loop.mp4\"\n".into(),
+        );
+
+        let transport = FakeTransport {
+            responses,
+            calls: std::sync::Mutex::new(Vec::new()),
+        };
+        let mut resolver = MotionCoverResolver::new(PathBuf::from("/cache"), MemStore::new());
+        let res = resolver.resolve(
+            &MotionTrackInput {
+                title: "Blinding Lights".into(),
+                artist: "The Weeknd — Blinding Lights - Single".into(),
+                album: String::new(),
+            },
+            true,
+            500,
+            &transport,
+        );
+        assert!(res.ok);
+        assert_eq!(res.collection_id.as_deref(), Some("1499378108"));
+        let calls = transport.calls.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(!calls.iter().any(|u| u.contains("country=jp")));
+    }
+
+    #[test]
+    fn live_album_never_falls_back_to_studio_album() {
+        let mut responses = HashMap::new();
+        let search_json = serde_json::json!({
+            "results": [{
+                "collectionId": 635770200,
+                "trackName": "Hotel California",
+                "artistName": "Eagles",
+                "collectionName": "Hotel California"
+            }]
+        })
+        .to_string();
+        responses.insert(
+            format!(
+                "https://itunes.apple.com/search?term={}&entity=song&limit=10&country=us",
+                net::encode_component("Hotel California Eagles")
+            ),
+            search_json,
+        );
+        responses.insert(
+            format!(
+                "https://itunes.apple.com/search?term={}&entity=song&limit=10&country=jp",
+                net::encode_component("Hotel California Eagles")
+            ),
+            r#"{"results":[]}"#.into(),
+        );
+        let transport = FakeTransport {
+            responses,
+            calls: std::sync::Mutex::new(Vec::new()),
+        };
+        let mut resolver = MotionCoverResolver::new(PathBuf::from("/cache"), MemStore::new());
+        let res = resolver.resolve(
+            &MotionTrackInput {
+                title: "Hotel California".into(),
+                artist: "Eagles".into(),
+                album: "Hell Freezes Over (Remaster 2018)".into(),
+            },
+            true,
+            500,
+            &transport,
+        );
+        assert!(!res.ok);
+        assert_eq!(res.reason, Some("no-match"));
     }
 }

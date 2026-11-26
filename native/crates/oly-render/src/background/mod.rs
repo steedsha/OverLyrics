@@ -19,6 +19,8 @@
 //! pass order and the four 200x200 RGBA16F targets live in the platform renderer
 //! that consumes [`scene::FramePlan`]; nothing here creates a device.
 
+#![allow(dead_code, unused_imports)]
+
 pub mod artwork;
 pub mod colour;
 pub mod gpu;

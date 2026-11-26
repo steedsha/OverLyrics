@@ -177,6 +177,51 @@ pub fn paint_row(
     align: LineAlign,
     row_blur: f32,
 ) {
+    paint_row_with_shadow(
+        window,
+        shaped,
+        origin_x,
+        origin_y,
+        line_height,
+        font_size,
+        words,
+        light,
+        playhead_ms,
+        line_scale,
+        wrapper,
+        feather_top,
+        feather_bottom,
+        feather_px,
+        wrap_width,
+        align,
+        row_blur,
+        0.0,
+        None,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn paint_row_with_shadow(
+    window: &mut Window,
+    shaped: &RowLines,
+    origin_x: f32,
+    origin_y: f32,
+    line_height: f32,
+    font_size: f32,
+    words: &[WordBox],
+    light: &RowLight,
+    playhead_ms: f64,
+    line_scale: f32,
+    wrapper: WrapperTransform,
+    feather_top: f32,
+    feather_bottom: f32,
+    feather_px: f32,
+    wrap_width: f32,
+    align: LineAlign,
+    row_blur: f32,
+    drop_shadow: f32,
+    custom_rgb: Option<u32>,
+) {
     use oly_render::emphasis::{sample_glow, sample_float, PlainFloat};
     let row_lines = &shaped.lines;
     let scale_factor = window.scale_factor();
@@ -283,7 +328,12 @@ pub fn paint_row(
                         rotation_scale: [[total_scale, 0.0], [0.0, total_scale]],
                         translation: [tx*scale_factor, ty*scale_factor],
                     };
-                    let text_rgb = super::chrome::lyric_text_rgb();
+                    let text_rgb = custom_rgb.unwrap_or_else(super::chrome::lyric_text_rgb);
+                    let r_c = ((text_rgb >> 16) & 0xFF) as f32 / 255.0;
+                    let g_c = ((text_rgb >> 8) & 0xFF) as f32 / 255.0;
+                    let b_c = (text_rgb & 0xFF) as f32 / 255.0;
+                    let text_luma = 0.2126 * r_c + 0.7152 * g_c + 0.0722 * b_c;
+                    let dark_text = text_luma < 0.35;
                     let (dark_out, bright_out) = if super::chrome::is_light_theme() {
                         (
                             if dark > 0.01 { (dark * 1.45).clamp(0.32, 1.0) } else { dark },
@@ -295,11 +345,35 @@ pub fn paint_row(
                     let mask = [1.0, (band*total_scale+tx)*scale_factor, fade_width*total_scale*scale_factor, dark_out];
                     let feather = [bright_out, feather_top*scale_factor, feather_bottom*scale_factor, feather_px*scale_factor];
                     #[cfg(target_os = "windows")]
-                    if let Err(error) = window.paint_lyric_glyph(
-                        point(px(x), px(y)), run.font_id, glyph.id, px(font_size),
-                        Hsla::from(gpui_kit::rgb(text_rgb)), transform, mask, feather,
-                        if shadow { (blur*scale_factor*1.5).ceil().clamp(1.0,64.0) as u16 } else { (row_blur*scale_factor*1.5).ceil().clamp(0.0,32.0) as u16 },
-                    ) { log::warn!("lyric glyph: {error:#}"); }
+                    {
+                        if !shadow && drop_shadow > 0.001 {
+                            let sa = if dark_text {
+                                (drop_shadow * 0.22 * bright_out.max(dark_out)).clamp(0.0, 0.22)
+                            } else {
+                                (drop_shadow * bright_out.max(dark_out)).clamp(0.0, 0.85)
+                            };
+                            if sa > 0.01 {
+                                let mut st = transform;
+                                st.translation[1] += if dark_text { 1.0 * scale_factor } else { 1.5 * scale_factor };
+                                let _ = window.paint_lyric_glyph(
+                                    point(px(x), px(y)),
+                                    run.font_id,
+                                    glyph.id,
+                                    px(font_size),
+                                    Hsla::from(gpui_kit::rgb(0x000000)).opacity(sa),
+                                    st,
+                                    [0.0; 4],
+                                    [0.0; 4],
+                                    2,
+                                );
+                            }
+                        }
+                        if let Err(error) = window.paint_lyric_glyph(
+                            point(px(x), px(y)), run.font_id, glyph.id, px(font_size),
+                            Hsla::from(gpui_kit::rgb(text_rgb)), transform, mask, feather,
+                            if shadow { (blur*scale_factor*1.5).ceil().clamp(1.0,64.0) as u16 } else { (row_blur*scale_factor*1.5).ceil().clamp(0.0,32.0) as u16 },
+                        ) { log::warn!("lyric glyph: {error:#}"); }
+                    }
                     #[cfg(not(target_os = "windows"))]
                     { let _ = window.paint_glyph(point(px(x+dx), px(y+dy)), run.font_id, glyph.id, px(font_size), Hsla::from(gpui_kit::rgb(text_rgb)).opacity(dark_out)); }
                 }

@@ -11,6 +11,7 @@ use std::{
 };
 const MAX_BODY: u64 = 8 * 1024 * 1024;
 const MAX_MOTION_MP4: u64 = 64 * 1024 * 1024;
+const MAX_UPDATE_EXE: u64 = 128 * 1024 * 1024;
 #[derive(Default)]
 pub struct NativeHttp;
 // Share the connection pool. A blocking client owns its own bounded runtime;
@@ -99,6 +100,98 @@ pub fn download_motion_mp4(url: &str, dest: &Path, timeout_ms: u64) -> Result<u6
         }
         if total < MIN_ASSET_BYTES || !has_ftyp_box(&head) {
             return Err(format!("invalid motion mp4 ({total} bytes)"));
+        }
+        file.flush().map_err(|e| e.to_string())?;
+        drop(file);
+        let _ = std::fs::remove_file(dest);
+        std::fs::rename(&tmp, dest).map_err(|e| e.to_string())?;
+        Ok(total)
+    })();
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    write_result
+}
+
+/// Performs a bounded HTTPS/HTTP GET and returns the UTF-8 body.
+pub fn get_text(url: &str, headers: &[(&str, &str)], timeout_ms: u64) -> Result<String, String> {
+    let parsed = validate_url(url)?;
+    let client = http_client()?;
+    let mut req = client.get(parsed).timeout(Duration::from_millis(timeout_ms.max(1)));
+    for &(k, v) in headers {
+        req = req.header(k, v);
+    }
+    let response = req.send().map_err(|e| e.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("HTTP {}", response.status().as_u16()));
+    }
+    let mut limited = response.take(MAX_BODY + 1);
+    let mut bytes = Vec::new();
+    limited.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > MAX_BODY {
+        return Err("response too large".into());
+    }
+    String::from_utf8(bytes).map_err(|e| e.to_string())
+}
+
+/// Downloads a Windows PE executable into `dest`, verifying the `MZ` header
+/// and an optional lowercase/uppercase hex SHA-256 digest before atomically
+/// moving it into place.
+pub fn download_exe_verified(
+    url: &str,
+    dest: &Path,
+    expected_sha256: Option<&str>,
+    timeout_ms: u64,
+) -> Result<u64, String> {
+    use sha2::{Digest, Sha256};
+
+    let parsed = validate_url(url)?;
+    let client = http_client()?;
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let tmp = dest.with_extension("exe.part");
+    let mut response = client
+        .get(parsed)
+        .timeout(Duration::from_millis(timeout_ms.max(1)))
+        .send()
+        .map_err(|e| e.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("HTTP {}", response.status().as_u16()));
+    }
+    let write_result = (|| -> Result<u64, String> {
+        let mut file = File::create(&tmp).map_err(|e| e.to_string())?;
+        let mut hasher = Sha256::new();
+        let mut buf = [0u8; 32 * 1024];
+        let mut head = [0u8; 2];
+        let mut head_len = 0usize;
+        let mut total: u64 = 0;
+        loop {
+            let n = response.read(&mut buf).map_err(|e| e.to_string())?;
+            if n == 0 {
+                break;
+            }
+            if head_len < 2 {
+                let take = (2 - head_len).min(n);
+                head[head_len..head_len + take].copy_from_slice(&buf[..take]);
+                head_len += take;
+            }
+            total += n as u64;
+            if total > MAX_UPDATE_EXE {
+                return Err("安装包体积超出上限 (128 MiB)".into());
+            }
+            hasher.update(&buf[..n]);
+            file.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+        }
+        if total < 64 * 1024 || head != *b"MZ" {
+            return Err("下载文件不是有效的 Windows 可执行程序".into());
+        }
+        if let Some(expected) = expected_sha256.map(str::trim).filter(|s| !s.is_empty()) {
+            let digest = hasher.finalize();
+            let actual: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+            if !actual.eq_ignore_ascii_case(expected) {
+                return Err("文件 SHA-256 校验失败，已中止更新".into());
+            }
         }
         file.flush().map_err(|e| e.to_string())?;
         drop(file);

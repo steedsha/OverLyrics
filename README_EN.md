@@ -4,12 +4,12 @@
   <p>A native Windows desktop lyrics &amp; music companion built with <strong>Rust</strong>, <strong>GPUI</strong>, and <strong>Direct3D 11</strong></p>
   <p><em>Built as a Vibe Coding project</em></p>
   <p>
-    <a href="README.md">简体中文</a> | <strong>English</strong>
+    <a href="README.md">简体中文</a> | <strong>English</strong> | <a href="https://overlyrics.steedsha.cn">Official Website</a>
   </p>
   <p>
     <img src="https://img.shields.io/badge/Platform-Windows%2010%2F11-0078D4?style=flat-square" alt="Windows" />
     <img src="https://img.shields.io/badge/Stack-Rust%20%2B%20GPUI%20%2B%20D3D11-orange?style=flat-square" alt="Rust + GPUI + D3D11" />
-    <img src="https://img.shields.io/badge/Version-v1.0.0-brightgreen?style=flat-square" alt="v1.0.0" />
+    <img src="https://img.shields.io/badge/Version-v1.1.0-brightgreen?style=flat-square" alt="v1.1.0" />
     <img src="https://img.shields.io/badge/License-AGPL--3.0-blue?style=flat-square" alt="AGPL-3.0" />
   </p>
 </div>
@@ -28,15 +28,16 @@
 - **Liquid Glass UI & Three Themes**: DirectWrite text shaping paired with Direct3D 11 shaders, offering `Liquid Glass`, `Light`, and `Dark` themes with customizable corner radii and accent colors.
 - **Immersion Backdrop & Beat Response**: OKLCH/Oklab palette extraction from album artwork with optional WASAPI audio capture for subtle edge beat-flash and elastic blob motion.
 - **Multi-Source Lyrics & Local Import**: Supports **AMLL TTML DB**, **Kugou**, **NetEase Cloud Music**, **QQ Music**, and **LRCLIB**, plus manual version switching and local `.lrc` / `.ttml` / `.qrc` / `.yrc` / `.txt` drag-and-drop import.
+- **Standalone Desktop Lyrics (Horizontal & Vertical)**: Borderless always-on-top transparent overlay with resizable edges, elastic hover controls, long-line scrolling / auto-fit, click-through lock (`Ctrl+L`), and a secondary color popover with a custom HSV palette.
 - **Four Window Modes**: Switch between `Mini`, `Album`, `Lyrics`, and `Window` (including fullscreen) with Windows SMTC media session switching.
 - **Word-by-Word Motion & Translation**: Per-syllable sweep, held-note glow & lift emphasis, harmony/background lines, and built-in free or configurable AI translation.
-- **Single-File Standalone Binary**: Statically linked CRT with embedded icon and font fallback — download `overlyrics.exe` and run directly with zero dependencies.
+- **Single-File Binary & Auto-Update**: Statically linked CRT with embedded icon and font fallback — download `overlyrics.exe` and run directly, with built-in update checking and one-click self-update.
 
 ## Quick Start
 
 ### Download Release
 
-Grab the standalone **`overlyrics.exe`** from [Releases](https://github.com/steedsha/OverLyrics/releases) and launch it directly.
+Grab the standalone **`overlyrics.exe`** from the **[Official Website](https://overlyrics.steedsha.cn)** or **[GitHub Releases](https://github.com/steedsha/OverLyrics/releases)** and launch it directly.
 
 ### Build from Source
 
@@ -57,6 +58,7 @@ The standalone binary is produced at `native/target/release/overlyrics.exe`.
 | `Space` | Play / Pause |
 | `F11` | Toggle fullscreen |
 | `Esc` | Step-by-step close active dropdown / settings / sub-panel / popover, or exit fullscreen |
+| `Ctrl + L` | Lock / unlock Desktop Lyrics click-through |
 | `Left` / `Right` | Seek `-5s` / `+5s` (replay mode) |
 
 ## FAQ
@@ -75,6 +77,13 @@ Due to differences across audio releases and lyric sources (such as intro length
 <summary>NetEase Cloud Music is not detected</summary>
 
 The NetEase Cloud Music desktop client does not expose full Windows SMTC playback info by default. Install [BetterNCM](https://std.microblock.cc/betterncm) and its **InfLink-rs** plugin, then restart NetEase Cloud Music.
+
+</details>
+
+<details>
+<summary>foobar2000 is not detected</summary>
+
+foobar2000 does not expose Windows System Media Transport Controls (SMTC) by default. Install the **[foo_mediacontrol](https://github.com/ghDaYuYu/foo_mediacontrol)** component and restart foobar2000 to enable playback detection and lyrics sync.
 
 </details>
 

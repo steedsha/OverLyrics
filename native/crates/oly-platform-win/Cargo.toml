@@ -14,6 +14,7 @@ oly-engine.workspace = true
 reqwest = { version = "=0.12.28", default-features = false, features = ["blocking", "rustls-tls-native-roots", "gzip", "deflate", "system-proxy"] }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 # The decoder publishes colour facts as `oly_render::video` types so the render
 # pass and the decoder can never disagree on the enum shape.
 oly-render.workspace = true

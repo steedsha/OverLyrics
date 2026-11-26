@@ -249,7 +249,9 @@ fn application_items(page: usize) -> Vec<Item> {
         6 => vec![
             info("about.author", "制作者", "steedsha"),
             info("about.version", "版本", concat!("v", env!("CARGO_PKG_VERSION"))),
-            action("action.openRepo", "开源仓库", "GitHub", false),
+            action("action.openWebsite", "官方网站", "查看", false),
+            action("action.openRepo", "开源仓库", "查看", false),
+            action("action.checkUpdate", "软件更新", "最新", false),
             action("action.privacyPolicy", "隐私条款", "查看", false),
         ],
         _ => vec![],
@@ -386,6 +388,7 @@ pub struct Settings {
     pub page: usize,
     pub title: &'static str,
     pub scroll: f32,
+    scroll_spring: oly_core::scroll::Spring,
     pub status: String,
     store: Option<Arc<ConfigStore>>,
     pending: Value,
@@ -396,6 +399,7 @@ pub struct Settings {
     pub tab_lens: super::chrome::SegmentedLens,
     pub open_choice: Option<usize>,
     pub choice_scroll: f32,
+    choice_scroll_spring: oly_core::scroll::Spring,
     pub choice_hover: Option<usize>,
     pub switch_preview:Option<(&'static str,f32)>,
     pub active_player: String,
@@ -430,6 +434,11 @@ impl Default for Settings {
             page: 0,
             title: "歌词设置",
             scroll: 0.,
+            scroll_spring: {
+                let mut s = oly_core::scroll::Spring::new(0.0);
+                s.update_params(oly_core::scroll::SpringParams::new(220.0, 26.0));
+                s
+            },
             status: String::new(),
             store: None,
             pending: json!({}),
@@ -440,6 +449,11 @@ impl Default for Settings {
             tab_lens: super::chrome::SegmentedLens::default(),
             open_choice: None,
             choice_scroll: 0.,
+            choice_scroll_spring: {
+                let mut s = oly_core::scroll::Spring::new(0.0);
+                s.update_params(oly_core::scroll::SpringParams::new(220.0, 26.0));
+                s
+            },
             choice_hover:None,switch_preview:None,
             active_player: String::new(),
             viewport_h: 0.,
@@ -466,7 +480,7 @@ impl Settings {
         self.kind = kind;
         self.title = match kind { SettingsKind::Application => "设置", SettingsKind::Lyrics => "歌词设置" };
         self.page = 0;
-        self.scroll = 0.;
+        self.set_scroll_immediate(0.0);
         self.outgoing_page = None;
         self.outgoing_scroll = 0.0;
         self.page_anim = 1.0;
@@ -475,6 +489,32 @@ impl Settings {
         self.switch_preview = None;
         self.segmented_drag = None;
         self.tab_lens = super::chrome::SegmentedLens::default();
+    }
+    pub fn set_scroll_immediate(&mut self, y: f32) {
+        let y = y.max(0.0);
+        self.scroll = y;
+        self.scroll_spring.set_position(y as f64);
+        self.scroll_spring.set_target_position(y as f64);
+    }
+    pub fn set_choice_scroll_immediate(&mut self, y: f32) {
+        let y = y.max(0.0);
+        self.choice_scroll = y;
+        self.choice_scroll_spring.set_position(y as f64);
+        self.choice_scroll_spring.set_target_position(y as f64);
+    }
+    pub fn wheel_scroll(&mut self, delta: f32, max_scroll: f32) {
+        let next = ((self.scroll_spring.target() as f32) - delta).clamp(0.0, max_scroll.max(0.0));
+        self.scroll_spring.set_target_position(next as f64);
+    }
+    pub fn wheel_choice_scroll(&mut self, delta: f32, max_scroll: f32) {
+        let next = ((self.choice_scroll_spring.target() as f32) - delta).clamp(0.0, max_scroll.max(0.0));
+        self.choice_scroll_spring.set_target_position(next as f64);
+    }
+    pub fn clamp_scroll(&mut self, max_scroll: f32) {
+        let max_s = max_scroll.max(0.0);
+        let target = (self.scroll_spring.target() as f32).clamp(0.0, max_s);
+        self.scroll_spring.set_target_position(target as f64);
+        self.scroll = (self.scroll_spring.position() as f32).clamp(0.0, max_s);
     }
     pub fn set_page(&mut self, page: usize) {
         let page = page.min(self.pages().len().saturating_sub(1));
@@ -488,7 +528,7 @@ impl Settings {
         self.page_dir = if page > self.page { 1 } else { -1 };
         self.page_anim = 0.0;
         self.page = page;
-        self.scroll = 0.0;
+        self.set_scroll_immediate(0.0);
     }
     pub fn pages(&self) -> &'static [&'static str] {
         match self.kind { SettingsKind::Application => APPLICATION_PAGES, SettingsKind::Lyrics => PAGES }
@@ -690,6 +730,8 @@ impl Settings {
             || self.segmented_lenses.values().any(super::chrome::SegmentedLens::pending)
             || self.outgoing_page.is_some()
             || self.switch_springs.values().any(|s| !s.arrived())
+            || !self.scroll_spring.arrived()
+            || !self.choice_scroll_spring.arrived()
     }
     pub fn value(&self, key: &str) -> Value {
         let resolved = self.resolve_key(key);
@@ -743,7 +785,7 @@ impl Settings {
     }
     pub fn close_choice(&mut self) {
         self.open_choice = None;
-        self.choice_scroll = 0.0;
+        self.set_choice_scroll_immediate(0.0);
         self.choice_hover=None;
     }
     pub fn custom_models_for(&self, provider: &str) -> Vec<String> {
@@ -1113,7 +1155,7 @@ impl Settings {
                     self.close_choice();
                 } else {
                     self.open_choice = Some(index);
-                    self.choice_scroll = 0.0;
+                    self.set_choice_scroll_immediate(0.0);
                     self.choice_hover=None;
                 }
                 false
@@ -1342,6 +1384,10 @@ impl Settings {
             .map(|prev| (now - prev).clamp(0.0, 100.0))
             .unwrap_or(16.0);
         self.last_tick_ms = Some(now);
+        self.scroll_spring.update(dt_ms / 1000.0);
+        self.scroll = self.scroll_spring.position().max(0.0) as f32;
+        self.choice_scroll_spring.update(dt_ms / 1000.0);
+        self.choice_scroll = self.choice_scroll_spring.position().max(0.0) as f32;
         if self.status != self.last_status {
             self.last_status = self.status.clone();
             if self.status.is_empty() {
@@ -2850,12 +2896,32 @@ fn paint_page_rows(
             }
             Control::Action { button, danger } => {
                 let fb = choice_feedback(*i as u8);
+                let dynamic_btn: Option<String> = if item.key == "action.checkUpdate" {
+                    Some(crate::updater::global().button_label())
+                } else {
+                    None
+                };
                 let btn_text = if item.key == "action.resetDefaults" && p.reset_armed {
                     "再次点击确认"
+                } else if let Some(ref dyn_label) = dynamic_btn {
+                    dyn_label.as_str()
                 } else {
                     button
                 };
-                let btn_w = (chrome::measure(window, btn_text, 12.0, 580.0).0 + 24.0).clamp(64.0, 132.0);
+                let primary = item.key == "action.checkUpdate"
+                    && crate::updater::global().is_update_available();
+                let is_about_btn = matches!(
+                    item.key,
+                    "action.openWebsite"
+                        | "action.openRepo"
+                        | "action.checkUpdate"
+                        | "action.privacyPolicy"
+                );
+                let btn_w = if is_about_btn {
+                    64.0
+                } else {
+                    (chrome::measure(window, btn_text, 12.0, 580.0).0 + 24.0).clamp(64.0, 184.0)
+                };
                 let btn = Box4::new(row.right() - 8.0 - btn_w, row.y + (row.h - 28.0) * 0.5, btn_w, 28.0);
                 let label_w = (btn.x - row.x - 16.0).max(40.0);
                 chrome::paint_text_fitted_vcentred(
@@ -2873,14 +2939,20 @@ fn paint_page_rows(
                     btn,
                     btn_text,
                     p.accent_hex,
-                    false,
+                    primary,
                     danger,
                     fb,
                     opacity,
                 );
             }
             Control::Info(val) => {
-                let val_w = chrome::measure(window, val, 12.5, 500.0).0;
+                let dynamic_val = if item.key == "about.version" {
+                    Some(crate::updater::global().version_badge(val))
+                } else {
+                    None
+                };
+                let val_str = dynamic_val.as_deref().unwrap_or(val);
+                let val_w = chrome::measure(window, val_str, 12.5, 500.0).0;
                 let label_w = (row.w - val_w - 28.0).max(40.0);
                 chrome::paint_text_fitted_vcentred(
                     window,
@@ -2894,7 +2966,7 @@ fn paint_page_rows(
                 );
                 chrome::paint_text_vcentred(
                     window,
-                    val,
+                    val_str,
                     row.right() - 8. - val_w,
                     row.centre().1,
                     12.5,
@@ -3265,7 +3337,9 @@ mod separation_tests {
             vec![
                 "about.author",
                 "about.version",
+                "action.openWebsite",
                 "action.openRepo",
+                "action.checkUpdate",
                 "action.privacyPolicy",
             ]
         );
