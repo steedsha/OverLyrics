@@ -24,8 +24,28 @@ jobs:
         working-directory: native
         run: cargo build --release -p oly-gpui-app --bin overlyrics
 
+      - name: Generate SHA-256 and latest.json
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $version = $tag.TrimStart('v', 'V')
+          $exe = "native/target/release/overlyrics.exe"
+          $sha256 = (Get-FileHash -Algorithm SHA256 $exe).Hash.ToLower()
+          "$sha256  overlyrics.exe" | Set-Content -Encoding ascii -NoNewline "SHA256SUMS.txt"
+          $manifest = [ordered]@{
+            version      = $version
+            notes        = "OverLyrics $tag"
+            download_url = "https://github.com/${{ github.repository }}/releases/download/$tag/overlyrics.exe"
+            sha256       = $sha256
+            release_url  = "https://overlyrics.steedsha.cn"
+          }
+          $manifest | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 "latest.json"
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: native/target/release/overlyrics.exe
+          files: |
+            native/target/release/overlyrics.exe
+            latest.json
+            SHA256SUMS.txt
           generate_release_notes: true
