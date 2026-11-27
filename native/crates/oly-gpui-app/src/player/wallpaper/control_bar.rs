@@ -1,17 +1,17 @@
-//! Edge-docked auto-hide floating liquid-glass control bar for Wallpaper Mode (Plan A).
+//! Edge-docked auto-hide floating liquid-glass Island control pill for Wallpaper Mode.
 //!
-//! Tucks neatly against the top-center edge of the primary display when idle,
-//! leaving only a subtle 4px luminous handle. Moving the cursor to the top-center
-//! edge slides out the full frosted glass pill with playback controls, inline
-//! volume drag slider, Desktop Lyrics toggle, and Exit Wallpaper button.
+//! Directly reuses the no-cover floating Island pill layout (36x36 cover thumb +
+//! title/artist + Prev/Play/Next + Volume + Exit icon button replacing More),
+//! tucked neatly to the top-center screen edge until the cursor approaches.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui_kit::{
-    Context, Hsla, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ParentElement, Render, Styled, Window, canvas, div, hsla, rgb,
+    Bounds, Context, CustomSurfaceHandle, Hsla, InteractiveElement, IntoElement, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Render, Styled, Window, canvas,
+    div, hsla, point, px, rgb, size,
 };
 use oly_core::scroll::{Spring, SpringParams};
 use oly_ui::chrome;
@@ -23,12 +23,12 @@ use crate::player::icons::{self, Icon};
 use crate::player::model::{Box4, ThemeMode};
 use crate::player::view::paint_sidecar_glass_frame;
 
-pub const CONTROL_BAR_W: f32 = 432.0;
-pub const CONTROL_BAR_H: f32 = 64.0;
-const PILL_W: f32 = 408.0;
-const PILL_H: f32 = 44.0;
+pub const CONTROL_BAR_W: f32 = 468.0;
+pub const CONTROL_BAR_H: f32 = 72.0;
+const PILL_W: f32 = 444.0;
+const PILL_H: f32 = 52.0;
 const PILL_TOP_SHOWN: f32 = 10.0;
-const PILL_TOP_HIDDEN: f32 = -42.0;
+const PILL_TOP_HIDDEN: f32 = -50.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum BarHit {
@@ -36,7 +36,6 @@ enum BarHit {
     Play,
     Next,
     VolTrack,
-    DesktopLyrics,
     Exit,
 }
 
@@ -44,6 +43,8 @@ pub struct WallpaperControlBar {
     bridge: Arc<SharedWallpaperBridge>,
     configured: bool,
     hwnd: isize,
+    cover_surface: Option<CustomSurfaceHandle>,
+    applied_cover_sig: u64,
     reveal_spring: Spring,
     play_morph: Spring,
     cursor: Option<(f32, f32)>,
@@ -66,6 +67,8 @@ impl WallpaperControlBar {
             bridge,
             configured: false,
             hwnd: 0,
+            cover_surface: None,
+            applied_cover_sig: 0,
             reveal_spring,
             play_morph: state_icon_spring(0.0),
             cursor: None,
@@ -121,13 +124,25 @@ impl Render for WallpaperControlBar {
         self.last_ms = now;
 
         let snap = self.bridge.read_snapshot();
+        if self.applied_cover_sig != snap.cover_sig {
+            self.applied_cover_sig = snap.cover_sig;
+            if let Some(old) = self.cover_surface.take() {
+                window.destroy_custom_surface(old);
+            }
+            if let Some(cover) = snap.cover.as_ref() {
+                if let Ok(handle) =
+                    window.create_custom_surface(cover.width, cover.height, &cover.rgba.pixels)
+                {
+                    self.cover_surface = Some(handle);
+                }
+            }
+        }
+
         let vp = window.viewport_size();
         let win_w = f32::from(vp.width).max(1.0);
         let sf = window.scale_factor().max(0.5);
         let wb = window.bounds();
 
-        // Check global OS cursor proximity to the top-center trigger zone so the bar
-        // smoothly slides down even when tucked away.
         let mut cursor_near_top = false;
         let mut cursor_in_bar = false;
         if let Some((cx_p, cy_p)) = win32_window::cursor_screen_pos() {
@@ -160,7 +175,6 @@ impl Render for WallpaperControlBar {
         self.reveal_spring.update(dt / 1000.0);
         let reveal = self.reveal_spring.position().clamp(0.0, 1.0) as f32;
 
-        // When fully tucked away, keep window click-through so desktop clicks pass unobstructed.
         let click_through = reveal < 0.08 && !want_open;
         if self.hwnd != 0 && self.applied_click_through != Some(click_through) {
             self.applied_click_through = Some(click_through);
@@ -175,18 +189,20 @@ impl Render for WallpaperControlBar {
         self.play_morph.update(dt / 1000.0);
         let play_morph = self.play_morph.position().clamp(0.0, 1.0) as f32;
 
-        let pill_x = (win_w - PILL_W) * 0.5;
-        let pill_y = PILL_TOP_HIDDEN + (PILL_TOP_SHOWN - PILL_TOP_HIDDEN) * reveal;
-        let pill = Box4::new(pill_x, pill_y, PILL_W, PILL_H);
-
-        let cy = pill.centre().1;
-        let btn_s = 28.0_f32;
-        let r_prev = Box4::new(pill.x + 112.0, cy - btn_s * 0.5, btn_s, btn_s);
-        let r_play = Box4::new(r_prev.right() + 4.0, cy - btn_s * 0.5, btn_s, btn_s);
-        let r_next = Box4::new(r_play.right() + 4.0, cy - btn_s * 0.5, btn_s, btn_s);
-        let r_vol = Box4::new(r_next.right() + 26.0, cy - 10.0, 64.0, 20.0);
-        let r_desk = Box4::new(r_vol.right() + 10.0, cy - btn_s * 0.5, btn_s, btn_s);
-        let r_exit = Box4::new(pill.right() - 78.0, cy - 14.0, 68.0, 28.0);
+        // Island pill geometry (52px tall, 18px radius — identical to no-cover Island)
+        let ir = Box4::new(
+            (win_w - PILL_W) * 0.5,
+            PILL_TOP_HIDDEN + (PILL_TOP_SHOWN - PILL_TOP_HIDDEN) * reveal,
+            PILL_W,
+            PILL_H,
+        );
+        let cy = ir.centre().1;
+        let btn_s = 30.0_f32;
+        let r_exit = Box4::new(ir.right() - 10.0 - btn_s, cy - btn_s * 0.5, btn_s, btn_s);
+        let r_vol = Box4::new(r_exit.x - 66.0, cy - 10.0, 56.0, 20.0);
+        let r_next = Box4::new(r_vol.x - 24.0 - btn_s, cy - btn_s * 0.5, btn_s, btn_s);
+        let r_play = Box4::new(r_next.x - 4.0 - btn_s, cy - btn_s * 0.5, btn_s, btn_s);
+        let r_prev = Box4::new(r_play.x - 4.0 - btn_s, cy - btn_s * 0.5, btn_s, btn_s);
         self.vol_track = r_vol;
 
         let hits = vec![
@@ -194,7 +210,6 @@ impl Render for WallpaperControlBar {
             (BarHit::Play, r_play),
             (BarHit::Next, r_next),
             (BarHit::VolTrack, r_vol),
-            (BarHit::DesktopLyrics, r_desk),
             (BarHit::Exit, r_exit),
         ];
         self.hits = hits.clone();
@@ -210,7 +225,6 @@ impl Render for WallpaperControlBar {
         if animating || want_open {
             window.request_animation_frame();
         } else if !self.idle_poll_pending {
-            // Low-power 12Hz hover check while tucked at top edge.
             self.idle_poll_pending = true;
             cx.spawn(async move |this, cx| {
                 cx.background_executor()
@@ -226,11 +240,13 @@ impl Render for WallpaperControlBar {
 
         let fb_map = self.feedback.clone();
         let light = snap.theme_mode == ThemeMode::Light;
+        let cover_surface = self.cover_surface;
         let title = if snap.track_title.trim().is_empty() {
             "OverLyrics".to_string()
         } else {
             snap.track_title.clone()
         };
+        let artist = snap.track_artist.clone();
 
         div()
             .size_full()
@@ -267,9 +283,6 @@ impl Render for WallpaperControlBar {
                             BarHit::Play => this.bridge.push(WallpaperCommand::PlayPause),
                             BarHit::Next => this.bridge.push(WallpaperCommand::Next),
                             BarHit::VolTrack => {}
-                            BarHit::DesktopLyrics => {
-                                this.bridge.push(WallpaperCommand::ToggleDesktopLyrics);
-                            }
                             BarHit::Exit => this.bridge.push(WallpaperCommand::ExitWallpaper),
                         }
                     }
@@ -297,96 +310,108 @@ impl Render for WallpaperControlBar {
                         if reveal < 0.02 {
                             return;
                         }
-                        let a = reveal;
-                        paint_sidecar_glass_frame(window, pill, 22.0, snap.theme_mode, a);
-
-                        let fg = |alpha: f32| chrome::text(alpha * a);
-                        let accent = Hsla::from(rgb(snap.accent_hex));
-
-                        // Truncated track title on left
-                        let short_title: String = if title.chars().count() > 8 {
-                            format!("{}…", title.chars().take(7).collect::<String>())
-                        } else {
-                            title.clone()
-                        };
-                        chrome::paint_text_vcentred(
+                        let ia = reveal;
+                        paint_sidecar_glass_frame(window, ir, 18.0, snap.theme_mode, ia);
+                        chrome::stroke_round(
                             window,
-                            &short_title,
-                            pill.x + 14.0,
-                            cy,
-                            11.5,
-                            550.0,
-                            fg(0.86),
+                            ir.x,
+                            ir.y,
+                            ir.w,
+                            ir.h,
+                            18.0,
+                            1.0,
+                            chrome::text(0.16 * ia),
                         );
 
-                        // Transport buttons
+                        // Cover thumbnail (36x36 rounded, matching no-cover Island)
+                        let has_thumb = cover_surface.is_some();
+                        if let Some(still) = cover_surface {
+                            let thumb = Bounds {
+                                origin: point(px(ir.x + 10.0), px(ir.y + 8.0)),
+                                size: size(px(36.0), px(36.0)),
+                            };
+                            window.paint_custom_surface_rounded(thumb, px(8.0), still);
+                            chrome::stroke_round(
+                                window,
+                                ir.x + 10.0,
+                                ir.y + 8.0,
+                                36.0,
+                                36.0,
+                                8.0,
+                                0.75,
+                                chrome::text(0.16 * ia),
+                            );
+                        }
+                        let text_x = if has_thumb { ir.x + 54.0 } else { ir.x + 16.0 };
+                        let meta_w = (r_prev.x - 10.0 - text_x).max(60.0);
+                        chrome::paint_text_fitted(
+                            window,
+                            &title,
+                            text_x,
+                            ir.y + 8.0,
+                            meta_w,
+                            13.0,
+                            600.0,
+                            chrome::text(0.95 * ia),
+                        );
+                        chrome::paint_text_fitted(
+                            window,
+                            &artist,
+                            text_x,
+                            ir.y + 25.0,
+                            meta_w,
+                            11.0,
+                            450.0,
+                            chrome::text(0.62 * ia),
+                        );
+
                         let draw_icon_btn = |window: &mut Window,
                                              cx: &mut gpui_kit::App,
                                              hit: BarHit,
                                              r: Box4,
                                              icon: Icon,
-                                             active: bool| {
+                                             danger_hover: bool| {
                             let f = fb_map.get(&hit).copied().unwrap_or_default();
                             if f.hover > 0.01 || f.press > 0.01 {
-                                chrome::fill_round(
-                                    window,
-                                    r.x,
-                                    r.y,
-                                    r.w,
-                                    r.h,
-                                    r.h * 0.5,
-                                    chrome::text((0.10 * f.hover + 0.08 * f.press) * a),
-                                );
+                                let bg = if danger_hover {
+                                    Hsla::from(rgb(0xFF3B30))
+                                        .opacity((0.18 * f.hover + 0.08 * f.press) * ia)
+                                } else {
+                                    chrome::text((0.10 * f.hover + 0.08 * f.press) * ia)
+                                };
+                                chrome::fill_round(window, r.x, r.y, r.w, r.h, r.h * 0.5, bg);
                             }
-                            let col = if active {
-                                chrome::accent_rgb(snap.accent_hex, 0.95 * a)
+                            let col = if danger_hover && f.hover > 0.05 {
+                                Hsla::from(rgb(0xFF453A)).opacity((0.92 + 0.06 * f.hover) * ia)
                             } else {
-                                fg(0.82 + 0.14 * f.hover)
+                                chrome::text((0.84 + 0.14 * f.hover) * ia)
                             };
                             icons::paint(
                                 window,
                                 cx,
                                 icon,
-                                Box4::new(r.x + 6.0, r.y + 6.0, 16.0, 16.0),
+                                Box4::new(r.x + 7.0, r.y + 7.0, 16.0, 16.0),
                                 col,
                             );
                         };
                         draw_icon_btn(window, cx, BarHit::Prev, r_prev, Icon::Prev, false);
-                        {
-                            let f = fb_map.get(&BarHit::Play).copied().unwrap_or_default();
-                            if f.hover > 0.01 || f.press > 0.01 {
-                                chrome::fill_round(
-                                    window,
-                                    r_play.x,
-                                    r_play.y,
-                                    r_play.w,
-                                    r_play.h,
-                                    r_play.h * 0.5,
-                                    chrome::text((0.12 * f.hover + 0.08 * f.press) * a),
-                                );
-                            }
-                            let icon = if play_morph > 0.5 {
-                                Icon::Pause
-                            } else {
-                                Icon::Play
-                            };
-                            icons::paint(
-                                window,
-                                cx,
-                                icon,
-                                Box4::new(r_play.x + 6.0, r_play.y + 6.0, 16.0, 16.0),
-                                fg(0.95),
-                            );
-                        }
+                        draw_icon_btn(
+                            window,
+                            cx,
+                            BarHit::Play,
+                            r_play,
+                            if play_morph > 0.5 { Icon::Pause } else { Icon::Play },
+                            false,
+                        );
                         draw_icon_btn(window, cx, BarHit::Next, r_next, Icon::Next, false);
 
-                        // Volume icon + mini track
+                        // Volume icon + inline slider
                         icons::paint(
                             window,
                             cx,
                             Icon::Volume,
                             Box4::new(r_vol.x - 19.0, cy - 7.0, 14.0, 14.0),
-                            fg(0.66),
+                            chrome::text(0.68 * ia),
                         );
                         let track_y = cy - 2.0;
                         chrome::fill_round(
@@ -396,58 +421,22 @@ impl Render for WallpaperControlBar {
                             r_vol.w,
                             4.0,
                             2.0,
-                            chrome::text(0.18 * a),
+                            chrome::text(0.18 * ia),
                         );
+                        let accent = Hsla::from(rgb(snap.accent_hex));
                         let frac = (snap.volume_pct as f32 / 100.0).clamp(0.0, 1.0);
-                        let fill_w = (r_vol.w * frac).max(4.0);
                         chrome::fill_round(
                             window,
                             r_vol.x,
                             track_y,
-                            fill_w,
+                            (r_vol.w * frac).max(4.0),
                             4.0,
                             2.0,
-                            hsla(accent.h, accent.s.max(0.55), accent.l.clamp(0.38, 0.62), 0.92 * a),
+                            hsla(accent.h, accent.s.max(0.55), accent.l.clamp(0.38, 0.62), 0.92 * ia),
                         );
 
-                        // Desktop Lyrics toggle
-                        draw_icon_btn(
-                            window,
-                            cx,
-                            BarHit::DesktopLyrics,
-                            r_desk,
-                            Icon::DesktopLyrics,
-                            snap.desktop_lyrics_open,
-                        );
-
-                        // Exit Wallpaper pill button
-                        let f_exit = fb_map.get(&BarHit::Exit).copied().unwrap_or_default();
-                        let exit_bg = hsla(
-                            accent.h,
-                            accent.s.max(0.55),
-                            (accent.l + 0.04 * f_exit.hover - 0.05 * f_exit.press).clamp(0.30, 0.64),
-                            (0.86 + 0.12 * f_exit.hover) * a,
-                        );
-                        chrome::fill_round(
-                            window,
-                            r_exit.x,
-                            r_exit.y,
-                            r_exit.w,
-                            r_exit.h,
-                            14.0,
-                            exit_bg,
-                        );
-                        let label = "退出壁纸";
-                        let (lw, _) = chrome::measure(window, label, 11.5, 600.0);
-                        chrome::paint_text_vcentred(
-                            window,
-                            label,
-                            r_exit.x + (r_exit.w - lw) * 0.5,
-                            cy,
-                            11.5,
-                            600.0,
-                            hsla(0.0, 0.0, 1.0, 0.96 * a),
-                        );
+                        // Exit wallpaper icon button (replaces More `...`)
+                        draw_icon_btn(window, cx, BarHit::Exit, r_exit, Icon::Close, true);
                     },
                 )
                 .size_full(),

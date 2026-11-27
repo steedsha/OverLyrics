@@ -1715,6 +1715,14 @@ impl Render for DesktopLyricsView {
         }
 
         let snap = self.bridge.read_snapshot();
+        // High-refresh local clock interpolation so word sweep & springs run at native 60/120/144/240Hz
+        // even when background snapshot sync ticks at 80ms.
+        let live_pos_ms = if snap.playing {
+            let elapsed = snap.sampled_at.elapsed().as_secs_f64() * 1000.0;
+            snap.position_ms + elapsed.clamp(0.0, 250.0)
+        } else {
+            snap.position_ms
+        };
         let track_sig = format!("{}\0{}", snap.track_title, snap.track_artist);
         let track_changed = !self.last_track_sig.is_empty() && track_sig != self.last_track_sig;
         if track_sig != self.last_track_sig {
@@ -1750,13 +1758,13 @@ impl Render for DesktopLyricsView {
         let play_morph = self.play_morph.position().clamp(0.0, 1.0) as f32;
 
         self.interlude_dots.set_playing(snap.playing);
-        self.interlude_dots.sync_clock(snap.position_ms);
+        self.interlude_dots.sync_clock(live_pos_ms);
         if snap.active_row.is_none() {
             if let Some((s, e)) = snap.interlude_range {
                 if self.last_interlude != Some((s, e)) {
                     self.last_interlude = Some((s, e));
                     self.interlude_dots
-                        .set_interlude(s, e, snap.position_ms, false, 0);
+                        .set_interlude(s, e, live_pos_ms, false, 0);
                 }
             } else if self.last_interlude.is_some() {
                 self.last_interlude = None;
@@ -2001,40 +2009,49 @@ impl Render for DesktopLyricsView {
             && display_lines > 1
             && !snap.rows.is_empty()
         {
-            let anchor_idx = snap.active_row_index.unwrap_or(0).min(snap.rows.len().saturating_sub(1));
-            let win_start = anchor_idx.saturating_sub(3);
-            let win_end = (anchor_idx + display_lines as usize + 3).min(snap.rows.len());
-            let slot_budget = display_lines as f32 * if show_trans { 1.65 } else { 1.08 };
+            let max_lines = display_lines as usize;
+            let selected_indices =
+                select_amll_multi_indices(&snap.rows, snap.active_row_index, live_pos_ms, max_lines);
+            let anchor_idx = snap
+                .active_row_index
+                .unwrap_or_else(|| selected_indices.first().copied().unwrap_or(0));
+            let slot_budget: f32 = selected_indices
+                .iter()
+                .map(|&i| {
+                    let r = &snap.rows[i];
+                    let base = if r.is_bg { 0.85 } else { 1.05 };
+                    if show_trans && !r.translation.trim().is_empty() {
+                        base + 0.58
+                    } else {
+                        base
+                    }
+                })
+                .sum();
             let avail_per_slot = (amll_area_h / slot_budget.max(1.0)).max(18.0);
             let fit_scale = (avail_per_slot / (font_size * 1.25)).clamp(0.42, 1.0);
             let bg_scale = snap.display.bg_scale.clamp(0.55, 0.90);
-            let gap = 5.0_f32;
+            let gap = 6.0_f32;
             let spring_params = match snap.display.spring_feel {
                 crate::player::model::SpringFeel::Lively => SpringParams::new(260.0, 26.0),
                 crate::player::model::SpringFeel::Soft => SpringParams::new(125.0, 22.0),
                 crate::player::model::SpringFeel::Standard => SpringParams::new(180.0, 24.0),
             };
 
-            let mut shaped_window: Vec<(usize, Row, Arc<RowLines>, f32, f32)> = Vec::new();
-            for idx in win_start..win_end {
+            let mut shaped_window: Vec<(usize, Row, Arc<RowLines>, f32, f32)> =
+                Vec::with_capacity(selected_indices.len());
+            for &idx in &selected_indices {
                 let r = &snap.rows[idx];
                 if r.text.trim().is_empty() {
                     continue;
                 }
                 let is_active = Some(idx) == snap.active_row_index;
-                let bg_active = r.is_bg
-                    && snap.position_ms >= r.start_ms - 400.0
-                    && snap.position_ms <= r.end_ms + 450.0;
-                let bg_target = if !r.is_bg || bg_active { 1.0_f32 } else { 0.0_f32 };
+                let bg_target = 1.0_f32;
                 let bg_alpha = {
-                    let bg_a = self.amll_bg_alpha.entry(idx).or_insert(bg_target);
-                    let step = (dt as f32 / 180.0).clamp(0.0, 1.0);
+                    let bg_a = self.amll_bg_alpha.entry(idx).or_insert(if r.is_bg { 0.0 } else { 1.0 });
+                    let step = (dt as f32 / 160.0).clamp(0.0, 1.0);
                     *bg_a += (bg_target - *bg_a) * step;
                     *bg_a
                 };
-                if r.is_bg && bg_alpha < 0.02 {
-                    continue;
-                }
                 let role_scale = if r.is_bg {
                     bg_scale
                 } else if is_active {
@@ -2051,45 +2068,39 @@ impl Render for DesktopLyricsView {
                     } else {
                         0.0
                     };
-                    let total_row_h = (s.line_height + th + gap) * if r.is_bg { bg_alpha } else { 1.0 };
+                    let total_row_h = s.line_height + th + gap;
                     shaped_window.push((idx, r.clone(), s, total_row_h, bg_alpha));
                 }
             }
 
-            let anchor_pos_in_win = shaped_window
+            // Vertically center the strictly <= N selected rows inside the safe lyric area.
+            let total_stack_h: f32 = (shaped_window
                 .iter()
-                .position(|(i, _, _, _, _)| *i == anchor_idx)
-                .unwrap_or(0);
-            let anchor_y = if display_lines >= 3 {
-                amll_area_top + amll_area_h * 0.14
-            } else {
-                amll_area_top + amll_area_h * 0.18
-            };
+                .map(|(_, _, _, h, _)| *h)
+                .sum::<f32>()
+                - gap)
+                .max(0.0);
             let mut target_ys = vec![0.0_f32; shaped_window.len()];
-            if !shaped_window.is_empty() {
-                target_ys[anchor_pos_in_win] = anchor_y;
-                let mut y_down = anchor_y + shaped_window[anchor_pos_in_win].3;
-                for k in (anchor_pos_in_win + 1)..shaped_window.len() {
-                    target_ys[k] = y_down;
-                    y_down += shaped_window[k].3;
-                }
-                let mut y_up = anchor_y;
-                for k in (0..anchor_pos_in_win).rev() {
-                    y_up -= shaped_window[k].3;
-                    target_ys[k] = y_up;
-                }
+            let mut y_cur = amll_area_top + ((amll_area_h - total_stack_h) * 0.5).max(0.0);
+            for (k, (_, _, _, h, _)) in shaped_window.iter().enumerate() {
+                target_ys[k] = y_cur;
+                y_cur += *h;
             }
 
             let mut out = Vec::with_capacity(shaped_window.len());
-            for (k, (idx, row, shaped, _, bg_alpha)) in shaped_window.into_iter().enumerate() {
+            for (k, (idx, row, shaped, row_h, bg_alpha)) in shaped_window.into_iter().enumerate() {
                 let ty = target_ys[k] as f64;
                 let dist = idx.abs_diff(anchor_idx);
-                let sp = self
-                    .amll_row_springs
-                    .entry(idx)
-                    .or_insert_with(|| crate::player::model::RowMotion::new(ty));
+                let sp = self.amll_row_springs.entry(idx).or_insert_with(|| {
+                    let start_y = if amll_snap_instant || !snap.display.enable_spring {
+                        ty
+                    } else {
+                        ty + (row_h as f64) * 0.55
+                    };
+                    crate::player::model::RowMotion::new(start_y)
+                });
                 let direct = amll_snap_instant || !snap.display.enable_spring;
-                let delay_s = (dist.min(4) as f64) * 0.032;
+                let delay_s = (dist.min(3) as f64) * 0.028;
                 let cur_y = sp.step(ty, direct, delay_s, dt, spring_params) as f32;
                 out.push(AmllMultiRow {
                     idx,
@@ -2100,9 +2111,9 @@ impl Render for DesktopLyricsView {
                 });
             }
             self.amll_row_springs
-                .retain(|&i, _| i >= win_start.saturating_sub(2) && i <= win_end + 2);
+                .retain(|i, _| selected_indices.contains(i));
             self.amll_bg_alpha
-                .retain(|&i, _| i >= win_start.saturating_sub(2) && i <= win_end + 2);
+                .retain(|i, _| selected_indices.contains(i));
             out
         } else {
             Vec::new()
@@ -2134,7 +2145,7 @@ impl Render for DesktopLyricsView {
                         .map(|l| f32::from(l.layout.width))
                         .unwrap_or(0.0);
                     let max_sx = (natural_w - horiz_avail_w).max(0.0);
-                    let prog = paint::line_progress(snap.position_ms, row.start_ms, row.duration_ms())
+                    let prog = paint::line_progress(live_pos_ms, row.start_ms, row.duration_ms())
                         .clamp(0.0, 1.0);
                     let adj = ((prog - 0.10) / 0.78).clamp(0.0, 1.0);
                     let target_sx = max_sx * smoothstep01(adj);
@@ -2609,9 +2620,12 @@ impl Render for DesktopLyricsView {
                                                     let edge_fade = edge_fade_top.min(edge_fade_bot);
                                                     let is_main_active = Some(item.idx) == snap.active_row_index && !r.is_bg;
                                                     let is_active = Some(item.idx) == snap.active_row_index
+                                                        || (!r.is_bg
+                                                            && live_pos_ms >= r.start_ms
+                                                            && live_pos_ms <= r.end_ms + 300.0)
                                                         || (r.is_bg
-                                                            && snap.position_ms >= r.start_ms
-                                                            && snap.position_ms <= r.end_ms + 300.0);
+                                                            && live_pos_ms >= r.start_ms
+                                                            && live_pos_ms <= r.end_ms + 300.0);
                                                     let dim = (if is_active {
                                                         if r.is_bg { 0.86 } else { 1.0 }
                                                     } else if r.is_bg {
@@ -2623,9 +2637,9 @@ impl Render for DesktopLyricsView {
                                                     if dim < 0.02 {
                                                         continue;
                                                     }
-                                                    let light = row_light(r, snap.position_ms, is_active, false, &snap.display);
+                                                    let light = row_light(r, live_pos_ms, is_active, false, &snap.display);
                                                     let progress = paint::line_progress(
-                                                        snap.position_ms,
+                                                        live_pos_ms,
                                                         r.start_ms,
                                                         r.duration_ms(),
                                                     );
@@ -2680,7 +2694,7 @@ impl Render for DesktopLyricsView {
                                                             s.font_size,
                                                             &s.words,
                                                             &row_light_val,
-                                                            snap.position_ms,
+                                                            live_pos_ms,
                                                             1.0,
                                                             WrapperTransform::default(),
                                                             -10000.0,
@@ -2738,9 +2752,9 @@ impl Render for DesktopLyricsView {
                                         );
                                     } else {
                                     let light =
-                                        row_light(row, snap.position_ms, true, false, &snap.display);
+                                        row_light(row, live_pos_ms, true, false, &snap.display);
                                     let progress = paint::line_progress(
-                                        snap.position_ms,
+                                        live_pos_ms,
                                         row.start_ms,
                                         row.duration_ms(),
                                     );
@@ -3068,3 +3082,110 @@ fn snap_and_clamp_drag(
     (nx, ny, sx, sy)
 }
 
+
+
+/// Smartly selects strictly at most `max_lines` (2 or 3) visible lyric rows for
+/// horizontal multi-line desktop lyrics:
+/// 1. Keeps all currently active rows (lead vocal + overlapping next lead + active harmony).
+/// 2. If active rows < `max_lines` and the next upcoming line isn't urgent yet (>1.2s away),
+///    retains the just-finished previous row for continuity instead of dropping it abruptly.
+/// 3. Fills remaining slots with upcoming rows, or backfills earlier rows near song end.
+fn select_amll_multi_indices(
+    rows: &[Row],
+    active_idx: Option<usize>,
+    pos_ms: f64,
+    max_lines: usize,
+) -> Vec<usize> {
+    let cap = max_lines.clamp(1, 3);
+    if rows.is_empty() {
+        return Vec::new();
+    }
+    let mut selected: Vec<usize> = Vec::with_capacity(cap + 2);
+    for (idx, r) in rows.iter().enumerate() {
+        if r.text.trim().is_empty() {
+            continue;
+        }
+        let active = if r.is_bg {
+            pos_ms >= r.start_ms - 250.0 && pos_ms <= r.end_ms + 350.0
+        } else {
+            pos_ms >= r.start_ms - 120.0 && pos_ms <= r.end_ms + 350.0
+        };
+        if active {
+            selected.push(idx);
+        }
+    }
+    if let Some(ai) = active_idx {
+        if ai < rows.len() && !rows[ai].text.trim().is_empty() && !selected.contains(&ai) {
+            selected.push(ai);
+            selected.sort_unstable();
+        }
+    }
+    if selected.is_empty() {
+        if let Some(first) = rows.iter().position(|r| !r.is_bg && !r.text.trim().is_empty()) {
+            selected.push(first);
+        } else {
+            return Vec::new();
+        }
+    }
+    if selected.len() >= cap {
+        let start = selected.len() - cap;
+        return selected[start..].to_vec();
+    }
+
+    let first_sel = selected[0];
+    let last_sel = *selected.last().unwrap();
+    let next_main_wait_ms = rows
+        .iter()
+        .enumerate()
+        .skip(last_sel + 1)
+        .find(|(_, r)| !r.is_bg && !r.text.trim().is_empty())
+        .map(|(_, r)| r.start_ms - pos_ms)
+        .unwrap_or(f64::INFINITY);
+
+    // If the next upcoming line isn't urgent yet, keep the just-finished previous row for context.
+    if next_main_wait_ms > 1200.0 && selected.len() < cap {
+        if let Some((prev_i, prev_r)) = rows[..first_sel]
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, r)| !r.text.trim().is_empty())
+        {
+            if pos_ms - prev_r.end_ms <= 3500.0 {
+                selected.insert(0, prev_i);
+            }
+        }
+    }
+
+    // Fill remaining slots with upcoming rows (main rows + imminent harmony rows).
+    for (idx, r) in rows.iter().enumerate().skip(last_sel + 1) {
+        if selected.len() >= cap {
+            break;
+        }
+        if r.text.trim().is_empty() {
+            continue;
+        }
+        if r.is_bg && r.start_ms > pos_ms + 1500.0 {
+            continue;
+        }
+        selected.push(idx);
+    }
+
+    // Near the end of the track, backfill from earlier non-empty rows.
+    if selected.len() < cap {
+        let cur_first = selected[0];
+        for (idx, r) in rows[..cur_first].iter().enumerate().rev() {
+            if selected.len() >= cap {
+                break;
+            }
+            if r.is_bg || r.text.trim().is_empty() {
+                continue;
+            }
+            selected.insert(0, idx);
+        }
+    }
+
+    selected.sort_unstable();
+    selected.dedup();
+    selected.truncate(cap);
+    selected
+}

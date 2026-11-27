@@ -1,16 +1,18 @@
 //! Temporary immersive desktop wallpaper mode (Plan A).
 //!
-//! Spawns borderless GPU-rendered immersive background window(s) attached to the
-//! Windows desktop `WorkerW` layer (behind desktop icons, without touching system
-//! wallpaper registry keys), paired with an edge-docked auto-hide floating glass
-//! control bar and fullscreen/lockscreen/pause auto-sleep (0% GPU when hidden).
+//! Renders the full immersive desktop scene (dynamic GPU background + cover +
+//! track title/artist + AMLL lyrics, without bottom transport controls) under
+//! desktop icons via `WorkerW`, paired with a top-center auto-hide floating
+//! liquid-glass Island pill (reusing the no-cover Island layout with an Exit
+//! button) and fullscreen/lockscreen/pause auto-sleep.
 
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicU64, Ordering},
 };
+use std::time::Instant;
 
-use super::model::ThemeMode;
+use super::model::{Display, Row, ThemeMode};
 use super::scene::{BeatConfig, Cover};
 
 pub mod bg_view;
@@ -24,13 +26,17 @@ pub struct WallpaperSnapshot {
     pub track_artist: String,
     pub cover: Option<Arc<Cover>>,
     pub cover_sig: u64,
+    pub display: Display,
+    pub rows: Arc<Vec<Row>>,
+    pub active_row_index: Option<usize>,
+    pub position_ms: f64,
+    pub sampled_at: Instant,
     pub theme_mode: ThemeMode,
     pub corner_radius: f32,
     pub accent_hex: u32,
     pub beat: BeatConfig,
     pub volume_pct: f64,
     pub volume_enabled: bool,
-    pub desktop_lyrics_open: bool,
 }
 
 impl Default for WallpaperSnapshot {
@@ -41,13 +47,17 @@ impl Default for WallpaperSnapshot {
             track_artist: String::new(),
             cover: None,
             cover_sig: 0,
+            display: Display::default(),
+            rows: Arc::new(Vec::new()),
+            active_row_index: None,
+            position_ms: 0.0,
+            sampled_at: Instant::now(),
             theme_mode: ThemeMode::LiquidGlass,
             corner_radius: 18.0,
             accent_hex: 0x0A84FF,
             beat: BeatConfig::default(),
             volume_pct: 100.0,
             volume_enabled: true,
-            desktop_lyrics_open: false,
         }
     }
 }
@@ -58,7 +68,6 @@ pub enum WallpaperCommand {
     PlayPause,
     Next,
     SetVolumePct(f64),
-    ToggleDesktopLyrics,
     ExitWallpaper,
 }
 

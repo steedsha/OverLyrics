@@ -1,23 +1,25 @@
-//! Standalone glass confirmation dialog for the main window close button.
+//! Standalone close confirmation dialog styled to match the Settings panel,
+//! supporting elastic panel dragging within the outer padding and concise copy.
 
-use gpui_kit::{
-    div, hsla, point, px, size, App, Context, IntoElement, InteractiveElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Render, Styled, Window,
-};
-use oly_ui::chrome;
-use oly_ui::interaction::Feedback;
-use oly_ui::panel_motion::PanelMotion;
-use oly_ui::win32_window;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use gpui_kit::{
+    App, Context, IntoElement, InteractiveElement, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ParentElement, Render, Styled, Window, div, hsla, point, px, size,
+};
+use oly_ui::chrome;
+use oly_ui::elastic::{Elastic, PressGesture};
+use oly_ui::interaction::Feedback;
+use oly_ui::panel_motion::PanelMotion;
+use oly_ui::win32_window;
+
 use super::icons::{self, Icon};
 use super::model::{Box4, ThemeMode};
-use super::view::paint_sidecar_glass_frame;
 
-const CARD_W: f32 = 344.0;
-const CARD_H: f32 = 192.0;
-const PAD: f32 = 12.0;
+const CARD_W: f32 = 308.0;
+const CARD_H: f32 = 152.0;
+const PAD: f32 = 14.0;
 
 pub const CLOSE_DIALOG_W: f32 = CARD_W + PAD * 2.0;
 pub const CLOSE_DIALOG_H: f32 = CARD_H + PAD * 2.0;
@@ -80,6 +82,9 @@ pub struct CloseConfirmDialog {
     was_active: bool,
     cursor: Option<(f32, f32)>,
     pressed: Option<Hit>,
+    panel_dragging: bool,
+    press_gesture: PressGesture,
+    panel_elastic: Elastic,
     fb_min: Feedback,
     fb_quit: Feedback,
     fb_rem: Feedback,
@@ -87,6 +92,7 @@ pub struct CloseConfirmDialog {
     motion: PanelMotion,
     started: Instant,
     last_ms: f64,
+    card_rect: Box4,
     r_min: Box4,
     r_quit: Box4,
     r_rem: Box4,
@@ -110,6 +116,9 @@ impl CloseConfirmDialog {
             was_active: false,
             cursor: None,
             pressed: None,
+            panel_dragging: false,
+            press_gesture: PressGesture::default(),
+            panel_elastic: Elastic::default(),
             fb_min: Feedback::default(),
             fb_quit: Feedback::default(),
             fb_rem: Feedback::default(),
@@ -117,6 +126,7 @@ impl CloseConfirmDialog {
             motion: PanelMotion::default(),
             started: Instant::now(),
             last_ms: 0.0,
+            card_rect: Box4::default(),
             r_min: Box4::default(),
             r_quit: Box4::default(),
             r_rem: Box4::default(),
@@ -152,9 +162,25 @@ impl Render for CloseConfirmDialog {
         }
         if window.is_window_active() {
             self.was_active = true;
-        } else if self.was_active && self.pressed.is_none() {
+        } else if self.was_active && self.pressed.is_none() && !self.panel_dragging {
             window.remove_window();
             return div().into_any_element();
+        }
+        if !win32_window::is_left_mouse_down() {
+            if self.pressed.is_some() || self.panel_dragging {
+                self.pressed = None;
+                self.panel_dragging = false;
+                self.press_gesture.cancel();
+            }
+        } else if self.panel_dragging || self.pressed.is_some() {
+            if let Some((cx_p, cy_p)) = win32_window::cursor_screen_pos() {
+                let sf = window.scale_factor().max(0.5);
+                let wb = window.bounds();
+                let lx = (cx_p as f32 / sf) - f32::from(wb.origin.x);
+                let ly = (cy_p as f32 / sf) - f32::from(wb.origin.y);
+                self.cursor = Some((lx, ly));
+                self.press_gesture.update(lx, ly);
+            }
         }
 
         let now = self.started.elapsed().as_secs_f64() * 1000.0;
@@ -162,16 +188,22 @@ impl Render for CloseConfirmDialog {
         self.last_ms = now;
         self.motion.step(true, dt);
 
-        let card = Box4::new(PAD, PAD, CARD_W, CARD_H);
+        let raw_delta = self.press_gesture.delta();
+        let panel_held = self.panel_dragging || (self.pressed.is_some() && self.press_gesture.dragged());
+        self.panel_elastic.step(raw_delta, panel_held, dt);
+        let pp = self.panel_elastic.pull();
+
+        let card = Box4::new(PAD + pp[0], PAD + pp[1], CARD_W, CARD_H);
+        self.card_rect = card;
         let r_close = Box4::new(card.right() - 34.0, card.y + 12.0, 24.0, 24.0);
-        let btn_y = card.y + 88.0;
+        let btn_y = card.y + 56.0;
         let btn_h = 36.0;
         let gap = 10.0;
-        let inner_w = card.w - 40.0;
+        let inner_w = card.w - 36.0;
         let btn_w = (inner_w - gap) * 0.5;
-        let r_min = Box4::new(card.x + 20.0, btn_y, btn_w, btn_h);
+        let r_min = Box4::new(card.x + 18.0, btn_y, btn_w, btn_h);
         let r_quit = Box4::new(r_min.right() + gap, btn_y, btn_w, btn_h);
-        let r_rem = Box4::new(card.x + 20.0, card.y + 140.0, inner_w, 28.0);
+        let r_rem = Box4::new(card.x + 18.0, card.y + 106.0, inner_w, 28.0);
         self.r_min = r_min;
         self.r_quit = r_quit;
         self.r_rem = r_rem;
@@ -187,9 +219,8 @@ impl Render for CloseConfirmDialog {
         self.fb_close
             .step(hot == Some(Hit::CloseX), self.pressed == Some(Hit::CloseX), dt);
 
-        let theme_mode = self.theme_mode;
-        let light = theme_mode == ThemeMode::Light;
-        let radius = self.corner_radius.clamp(14.0, 22.0);
+        let light = self.theme_mode == ThemeMode::Light;
+        let radius = self.corner_radius.clamp(14.0, 20.0);
         let accent_hex = self.accent_hex;
         let surf_a = self.motion.surface_alpha();
         let cont_a = self.motion.content_alpha();
@@ -203,22 +234,36 @@ impl Render for CloseConfirmDialog {
             .size_full()
             .bg(gpui_kit::transparent_black())
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, _| {
-                this.cursor = Some((f32::from(ev.position.x), f32::from(ev.position.y)));
+                let (x, y) = (f32::from(ev.position.x), f32::from(ev.position.y));
+                this.cursor = Some((x, y));
+                if this.panel_dragging || this.pressed.is_some() {
+                    this.press_gesture.update(x, y);
+                }
             }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, ev: &MouseDownEvent, _, _| {
                     let (x, y) = (f32::from(ev.position.x), f32::from(ev.position.y));
                     this.cursor = Some((x, y));
-                    this.pressed = this.hit_at(x, y);
+                    let hit = this.hit_at(x, y);
+                    this.pressed = hit;
+                    if hit.is_some() {
+                        this.press_gesture.begin(x, y);
+                    } else if this.card_rect.contains(x, y) {
+                        this.panel_dragging = true;
+                        this.press_gesture.begin(x, y);
+                    }
                 }),
             )
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, ev: &MouseUpEvent, window, _| {
                     let (x, y) = (f32::from(ev.position.x), f32::from(ev.position.y));
+                    let dragged = this.press_gesture.dragged();
+                    this.press_gesture.cancel();
+                    this.panel_dragging = false;
                     let pressed = this.pressed.take();
-                    if pressed.is_some() && pressed == this.hit_at(x, y) {
+                    if !dragged && pressed.is_some() && pressed == this.hit_at(x, y) {
                         match pressed.unwrap() {
                             Hit::Minimize => {
                                 this.bridge.submit(CloseDialogResult {
@@ -249,29 +294,46 @@ impl Render for CloseConfirmDialog {
                     move |_, _, _| {},
                     move |_, _, window, cx| {
                         chrome::set_light_theme(light);
-                        paint_sidecar_glass_frame(window, card, radius, theme_mode, surf_a);
+                        // Settings-panel frosted surface (high legibility, never muddy over lyrics)
+                        let card_bg = if light {
+                            hsla(0.0, 0.0, 0.965, 0.96 * surf_a)
+                        } else {
+                            hsla(0.0, 0.0, 0.115, 0.94 * surf_a)
+                        };
+                        let card_border = if light {
+                            hsla(0.0, 0.0, 0.0, 0.12 * surf_a)
+                        } else {
+                            hsla(0.0, 0.0, 1.0, 0.14 * surf_a)
+                        };
+                        // Soft elevation shadow
+                        chrome::fill_round(
+                            window,
+                            card.x,
+                            card.y + 4.0,
+                            card.w,
+                            card.h,
+                            radius,
+                            hsla(0.0, 0.0, 0.0, 0.28 * surf_a),
+                        );
+                        chrome::fill_round(window, card.x, card.y, card.w, card.h, radius, card_bg);
+                        chrome::stroke_round(
+                            window,
+                            card.x,
+                            card.y,
+                            card.w,
+                            card.h,
+                            radius,
+                            1.0,
+                            card_border,
+                        );
 
-                        let fg_primary = if light {
-                            hsla(0.0, 0.0, 0.08, 0.94 * cont_a)
-                        } else {
-                            hsla(0.0, 0.0, 1.0, 0.96 * cont_a)
-                        };
-                        let fg_sub = if light {
-                            hsla(0.0, 0.0, 0.28, 0.80 * cont_a)
-                        } else {
-                            hsla(0.0, 0.0, 0.88, 0.72 * cont_a)
-                        };
+                        let fg_primary = chrome::text(0.95 * cont_a);
+                        let fg_sub = chrome::text(0.68 * cont_a);
 
                         // Close X button
-                        if fb_close.hover > 0.01 || fb_close.press > 0.01 {
-                            let a = (0.10 * fb_close.hover + 0.08 * fb_close.press) * cont_a;
-                            let bg = if light {
-                                hsla(0.0, 0.0, 0.0, a)
-                            } else {
-                                hsla(0.0, 0.0, 1.0, a)
-                            };
-                            chrome::fill_round(window, r_close.x, r_close.y, r_close.w, r_close.h, 8.0, bg);
-                        }
+                        chrome::control_surface_alpha_radius(
+                            window, r_close, fb_close, false, cont_a, 8.0,
+                        );
                         icons::paint(
                             window,
                             cx,
@@ -280,24 +342,15 @@ impl Render for CloseConfirmDialog {
                             fg_sub,
                         );
 
-                        // Title & subtitle
+                        // Concise title only
                         chrome::paint_text(
                             window,
                             "关闭窗口",
-                            card.x + 20.0,
-                            card.y + 20.0,
+                            card.x + 18.0,
+                            card.y + 18.0,
                             15.5,
                             650.0,
                             fg_primary,
-                        );
-                        chrome::paint_text(
-                            window,
-                            "点击关闭按钮时希望执行哪项操作？",
-                            card.x + 20.0,
-                            card.y + 49.0,
-                            12.5,
-                            450.0,
-                            fg_sub,
                         );
 
                         // Primary button: 最小化到托盘
@@ -310,43 +363,43 @@ impl Render for CloseConfirmDialog {
                         );
                         chrome::fill_round(window, r_min.x, r_min.y, r_min.w, r_min.h, 10.0, min_bg);
                         let min_label = "最小化到托盘";
-                        let (mw, _) = chrome::measure(window, min_label, 13.0, 600.0);
-                        chrome::paint_text(
+                        let (mw, _) = chrome::measure(window, min_label, 12.5, 600.0);
+                        chrome::paint_text_vcentred(
                             window,
                             min_label,
                             r_min.x + (r_min.w - mw) * 0.5,
-                            r_min.y + (r_min.h - 17.0) * 0.5,
-                            13.0,
+                            r_min.centre().1,
+                            12.5,
                             600.0,
                             hsla(0.0, 0.0, 1.0, 0.98 * cont_a),
                         );
 
-                        // Secondary button: 退出程序
+                        // Secondary button: 退出 (matching Settings action pill)
                         let quit_bg = if light {
-                            hsla(0.0, 0.0, 0.0, (0.07 + 0.06 * fb_quit.hover + 0.05 * fb_quit.press) * cont_a)
+                            hsla(0.0, 0.0, 0.0, (0.06 + 0.06 * fb_quit.hover + 0.05 * fb_quit.press) * cont_a)
                         } else {
-                            hsla(0.0, 0.0, 1.0, (0.11 + 0.07 * fb_quit.hover + 0.05 * fb_quit.press) * cont_a)
+                            hsla(0.0, 0.0, 1.0, (0.09 + 0.07 * fb_quit.hover + 0.05 * fb_quit.press) * cont_a)
                         };
                         let quit_border = if light {
                             hsla(0.0, 0.0, 0.0, 0.12 * cont_a)
                         } else {
-                            hsla(0.0, 0.0, 1.0, 0.16 * cont_a)
+                            hsla(0.0, 0.0, 1.0, 0.14 * cont_a)
                         };
                         chrome::fill_round(window, r_quit.x, r_quit.y, r_quit.w, r_quit.h, 10.0, quit_bg);
                         chrome::stroke_round(window, r_quit.x, r_quit.y, r_quit.w, r_quit.h, 10.0, 1.0, quit_border);
-                        let quit_label = "退出程序";
-                        let (qw, _) = chrome::measure(window, quit_label, 13.0, 550.0);
-                        chrome::paint_text(
+                        let quit_label = "退出";
+                        let (qw, _) = chrome::measure(window, quit_label, 12.5, 550.0);
+                        chrome::paint_text_vcentred(
                             window,
                             quit_label,
                             r_quit.x + (r_quit.w - qw) * 0.5,
-                            r_quit.y + (r_quit.h - 17.0) * 0.5,
-                            13.0,
+                            r_quit.centre().1,
+                            12.5,
                             550.0,
                             fg_primary,
                         );
 
-                        // Checkbox row: 记住我的选择（之后可在设置中更改）
+                        // Concise checkbox: 记住选择
                         let box_s = 15.0_f32;
                         let bx = r_rem.x + 2.0;
                         let by = r_rem.y + (r_rem.h - box_s) * 0.5;
@@ -370,25 +423,17 @@ impl Render for CloseConfirmDialog {
                                 hsla(0.0, 0.0, 1.0, 0.98 * cont_a),
                             );
                         } else {
-                            let cb_bg = if light {
-                                hsla(0.0, 0.0, 0.0, (0.04 + 0.05 * fb_rem.hover) * cont_a)
-                            } else {
-                                hsla(0.0, 0.0, 1.0, (0.07 + 0.06 * fb_rem.hover) * cont_a)
-                            };
-                            let cb_border = if light {
-                                hsla(0.0, 0.0, 0.0, (0.28 + 0.14 * fb_rem.hover) * cont_a)
-                            } else {
-                                hsla(0.0, 0.0, 1.0, (0.34 + 0.16 * fb_rem.hover) * cont_a)
-                            };
+                            let cb_bg = chrome::text((0.05 + 0.05 * fb_rem.hover) * cont_a);
+                            let cb_border = chrome::text((0.28 + 0.14 * fb_rem.hover) * cont_a);
                             chrome::fill_round(window, bx, by, box_s, box_s, 4.5, cb_bg);
                             chrome::stroke_round(window, bx, by, box_s, box_s, 4.5, 1.2, cb_border);
                         }
-                        chrome::paint_text(
+                        chrome::paint_text_vcentred(
                             window,
-                            "记住我的选择（之后可在设置中更改）",
+                            "记住选择",
                             bx + box_s + 8.0,
-                            r_rem.y + (r_rem.h - 15.0) * 0.5,
-                            11.5,
+                            r_rem.centre().1,
+                            12.0,
                             450.0,
                             fg_sub,
                         );

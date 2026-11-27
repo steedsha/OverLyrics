@@ -2578,6 +2578,31 @@ impl PlayerView {
             .map(|(_, v)| *v)
             .unwrap_or(100.0)
             .clamp(0.0, 100.0);
+        let pos = self.lyric_time();
+        let mut active_idx: Option<usize> = None;
+        let mut first_main: Option<usize> = None;
+        let mut last_main: Option<usize> = None;
+        let mut prev_before_next: Option<usize> = None;
+        let mut next_after_pos: Option<usize> = None;
+        for (idx, r) in self.rows.iter().enumerate() {
+            if r.is_bg || r.text.trim().is_empty() {
+                continue;
+            }
+            if first_main.is_none() {
+                first_main = Some(idx);
+            }
+            if pos >= r.start_ms && pos <= r.end_ms + 350.0 {
+                active_idx = Some(idx);
+            }
+            if next_after_pos.is_none() && r.start_ms > pos {
+                prev_before_next = last_main;
+                next_after_pos = Some(idx);
+            }
+            last_main = Some(idx);
+        }
+        if active_idx.is_none() {
+            active_idx = prev_before_next.or(first_main).or(last_main);
+        }
         self.wallpaper_bridge
             .update_snapshot(super::wallpaper::WallpaperSnapshot {
                 playing: self.playing,
@@ -2585,17 +2610,21 @@ impl PlayerView {
                 track_artist: artist,
                 cover: self.wallpaper_cover_arc.clone(),
                 cover_sig: self.wallpaper_cover_sig,
+                display: self.display,
+                rows: Arc::clone(&self.desktop_rows_cache),
+                active_row_index: active_idx,
+                position_ms: pos,
+                sampled_at: std::time::Instant::now(),
                 theme_mode: self.display.theme_mode,
                 corner_radius: self.display.corner_radius,
                 accent_hex: self.display.accent_hex,
                 beat,
                 volume_pct: vol_pct,
                 volume_enabled: self.live.is_some(),
-                desktop_lyrics_open: self.desktop_child.is_some(),
             });
     }
 
-    pub(super) fn tick_wallpaper(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn tick_wallpaper(&mut self, _cx: &mut Context<Self>) {
         if self.wallpaper_windows.is_empty() && self.wallpaper_control_bar.is_none() {
             return;
         }
@@ -2634,14 +2663,6 @@ impl PlayerView {
                             source: VolumeSource::AppMixer,
                             generation: 0,
                         });
-                    }
-                }
-                super::wallpaper::WallpaperCommand::ToggleDesktopLyrics => {
-                    if let Some(child) = self.desktop_child.take() {
-                        self.persist_desktop_child_bounds(child, cx);
-                        let _ = child.update(cx, |_, w, _| w.remove_window());
-                    } else {
-                        self.pending_desktop_lyrics = true;
                     }
                 }
                 super::wallpaper::WallpaperCommand::ExitWallpaper => {
@@ -2724,7 +2745,14 @@ impl PlayerView {
             };
             let bridge = self.wallpaper_bridge.clone();
             if let Ok((child, _)) = gpui_kit::open_window(options, cx, move |_, cx| {
-                cx.new(|_| super::wallpaper::bg_view::WallpaperBgView::new(bridge, logical_rect))
+                let text_system = cx.text_system().clone();
+                cx.new(|_| {
+                    super::wallpaper::bg_view::WallpaperBgView::new(
+                        bridge,
+                        logical_rect,
+                        text_system,
+                    )
+                })
             }) {
                 self.wallpaper_windows.push(child);
             }
@@ -3331,6 +3359,7 @@ impl PlayerView {
                 track_artist,
                 display: self.display,
                 position_ms: pos,
+                sampled_at: std::time::Instant::now(),
                 active_row,
                 active_row_index,
                 rows: Arc::clone(&self.desktop_rows_cache),
