@@ -424,6 +424,8 @@ pub(super) struct Plan {
     pub(super) chrome: Chrome,
     pub(super) bg: Option<CustomSurfaceHandle>,
     pub(super) cover: Option<CustomSurfaceHandle>,
+    pub(super) prev_cover: Option<CustomSurfaceHandle>,
+    pub(super) cover_fade: f32,
     pub(super) motion: Option<CustomSurfaceHandle>,
     pub(super) motion_alpha: f32,
     pub(super) rows: Vec<PlanRow>,

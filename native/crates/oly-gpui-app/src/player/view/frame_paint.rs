@@ -123,7 +123,18 @@ pub(super) fn paint_frame(
                     origin: point(px(cover.x), px(cover.y)),
                     size: gpui_kit::size(px(cover.w), px(cover.h)),
                 };
-                if cover_alpha < 0.999 {
+                if let Some(prev) = plan.prev_cover.filter(|_| plan.cover_fade < 0.999) {
+                    if cover_alpha < 0.999 {
+                        window.paint_custom_surface_rounded_opacity(b, px(radius), prev, cover_alpha);
+                    } else {
+                        window.paint_custom_surface_rounded(b, px(radius), prev);
+                    }
+                    let fade = oly_ui::color::smoothstep01(plan.cover_fade);
+                    let top_alpha = (fade * cover_alpha).clamp(0.0, 1.0);
+                    if top_alpha > 0.002 {
+                        window.paint_custom_surface_rounded_opacity(b, px(radius), still, top_alpha);
+                    }
+                } else if cover_alpha < 0.999 {
                     window.paint_custom_surface_rounded_opacity(b, px(radius), still, cover_alpha);
                 } else {
                     window.paint_custom_surface_rounded(b, px(radius), still);

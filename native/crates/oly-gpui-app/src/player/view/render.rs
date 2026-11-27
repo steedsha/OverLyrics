@@ -1944,6 +1944,8 @@ impl Render for PlayerView {
             chrome: chrome.clone(),
             bg: if !immersion || !self.scene.as_ref().is_some_and(PlayerScene::has_background) { None } else { self.bg_surface },
             cover: self.cover_surface,
+            prev_cover: self.prev_cover_surface,
+            cover_fade: self.cover_fade,
             motion: if motion_alpha > 0.001 { self.motion_surface } else { None },
             motion_alpha,
             rows: plan_rows,

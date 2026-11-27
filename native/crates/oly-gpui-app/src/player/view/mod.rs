@@ -84,6 +84,7 @@ pub struct PlayerView {
     bg_size: (u32, u32),
     cover: Option<Cover>,
     cover_surface: Option<CustomSurfaceHandle>,
+    prev_cover_surface: Option<CustomSurfaceHandle>,
     cover_size: (u32, u32),
     motion_surface: Option<CustomSurfaceHandle>,
     motion_size: (u32, u32),
@@ -131,9 +132,7 @@ pub struct PlayerView {
     motion_fade: f32,
     inline_switch_drag: Option<InlineSwitchDrag>,
     bg_cover_hash: Option<(usize, u64)>,
-    prev_cover_rgba: Option<Vec<u8>>,
     cover_fade: f32,
-    cover_blend_buf: Vec<u8>,
     cover_accent_hex: Option<u32>,
     island_wake_ms: f64,
     island_drop: f32,
@@ -304,6 +303,7 @@ impl PlayerView {
             bg_size: (0, 0),
             cover: None,
             cover_surface: None,
+            prev_cover_surface: None,
             cover_size: (0, 0),
             motion_surface: None,
             motion_size: (0, 0),
@@ -313,7 +313,7 @@ impl PlayerView {
             sync,pending_mode:None,switch_drag:None,segmented_drag:None,pre_fullscreen_mode:2,last_fullscreen:false,always_on_top:false,applied_always_on_top:None,window_controls_alpha:0.0,pending_minimize:false,pending_quit:false,picker_scroll_spring:{let mut s=oly_core::scroll::Spring::new(0.0);s.update_params(oly_core::scroll::SpringParams::new(220.0,26.0));s},picker_capacity:4,picker_kind:PickerKind::Lyrics,chrome_wake_ms:0.,cursor_idle_ms:0.,cursor_hide_pending:false,browse_idle_ms:0.,lyrics_user_hidden:false,lyrics_auto_hidden:start_idle,lyrics_user_force_shown:false,lyrics_center:{let mut s=oly_core::scroll::Spring::new(if start_idle {1.0} else {0.0});s.update_params(oly_core::scroll::SpringParams::new(140.0,22.0));s},lyrics_reveal_alpha:if start_idle {0.0} else {1.0},staged_mode:None,wide_size:None,last_window_bounds:None,
             mode_transition:None,geometry_memory:Default::default(),
             volume_req_id:0,volume_read_id:None,volume_read_deadline_ms:None,volume_cached:None,
-            pending_motion_path:None,motion_debounce_deadline_ms:None,motion_dispatched:None,motion_needs_clear:false,motion_last_enabled:true,motion_fade:0.0,inline_switch_drag:None,bg_cover_hash:None,prev_cover_rgba:None,cover_fade:1.0,cover_blend_buf:Vec::new(),cover_accent_hex:None,island_wake_ms:-10_000.0,island_drop:0.0,cover_gone_at_ms:None,compact_chrome_alpha:1.0,album_meta_alpha:1.0,
+            pending_motion_path:None,motion_debounce_deadline_ms:None,motion_dispatched:None,motion_needs_clear:false,motion_last_enabled:true,motion_fade:0.0,inline_switch_drag:None,bg_cover_hash:None,cover_fade:1.0,cover_accent_hex:None,island_wake_ms:-10_000.0,island_drop:0.0,cover_gone_at_ms:None,compact_chrome_alpha:1.0,album_meta_alpha:1.0,
             cover_scale_spring: {
                 let mut s = oly_core::scroll::Spring::new(1.0);
                 s.update_params(oly_core::scroll::SpringParams::new(260.0, 24.0));
@@ -850,8 +850,6 @@ impl PlayerView {
             self.cover = None;
             self.cover_accent_hex = None;
             self.bg_cover_hash = None;
-            self.prev_cover_rgba = None;
-            self.cover_blend_buf = Vec::new();
             self.cover_fade = 1.0;
             self.cover_dirty = true;
             if let Some(scene) = self.scene.as_mut() {
@@ -991,24 +989,7 @@ impl PlayerView {
         if self.bg_cover_hash == Some(sig) {
             return;
         }
-        self.prev_cover_rgba = self.cover.as_ref().and_then(|old| {
-            if old.width == cover.width && old.height == cover.height {
-                Some(old.rgba.pixels.clone())
-            } else {
-                image::RgbaImage::from_raw(old.width, old.height, old.rgba.pixels.clone()).map(
-                    |img| {
-                        image::imageops::resize(
-                            &img,
-                            cover.width,
-                            cover.height,
-                            image::imageops::FilterType::Triangle,
-                        )
-                        .into_raw()
-                    },
-                )
-            }
-        });
-        self.cover_fade = if self.prev_cover_rgba.is_some() { 0.0 } else { 1.0 };
+        self.cover_fade = if self.cover_surface.is_some() { 0.0 } else { 1.0 };
         self.bg_cover_hash = Some(sig);
         let Some(scene) = self.scene.as_mut() else {
             return;
@@ -1094,72 +1075,50 @@ impl PlayerView {
                 if let Some(old) = self.cover_surface.take() {
                     window.destroy_custom_surface(old);
                 }
+                if let Some(old) = self.prev_cover_surface.take() {
+                    window.destroy_custom_surface(old);
+                }
                 self.cover_size = (0, 0);
+                self.cover_fade = 1.0;
                 self.cover_dirty = false;
             }
             return;
         };
-        let mut need_upload = self.cover_dirty;
-        self.cover_dirty = false;
-        if self.cover_fade < 1.0 {
-            self.cover_fade = (self.cover_fade + (dt_ms.clamp(0.0, 100.0) as f32 / 550.0)).min(1.0);
-            need_upload = true;
-        }
-        if self.cover_surface.is_some() && self.cover_size != (cover.width, cover.height) {
-            if let Some(old) = self.cover_surface.take() {
+        if self.cover_dirty {
+            self.cover_dirty = false;
+            let bytes = cover.rgba.pixels.as_slice();
+            if self.cover_fade < 1.0 {
+                if let Some(old_prev) = self.prev_cover_surface.take() {
+                    window.destroy_custom_surface(old_prev);
+                }
+                self.prev_cover_surface = self.cover_surface.take();
+            } else if let Some(old) = self.cover_surface.take() {
+                if self.cover_size == (cover.width, cover.height) {
+                    if let Err(error) = window.update_custom_surface(old, bytes) {
+                        log::warn!("cover surface update: {error:#}");
+                    }
+                    self.cover_surface = Some(old);
+                    return;
+                }
                 window.destroy_custom_surface(old);
             }
-            self.cover_size = (0, 0);
-        }
-        if self.cover_surface.is_some() && !need_upload {
-            if self.cover_fade < 1.0 {
-                self.cover_fade = 1.0;
-            }
-            if self.prev_cover_rgba.is_some() {
-                self.prev_cover_rgba = None;
-                self.cover_blend_buf = Vec::new();
-            }
-            return;
-        }
-        let target_bytes = cover.rgba.pixels.as_slice();
-        let bytes: &[u8] = if self.cover_fade < 1.0 {
-            if let Some(prev) = self.prev_cover_rgba.as_ref().filter(|p| p.len() == target_bytes.len()) {
-                let s = self.cover_fade;
-                let smooth = s * s * (3.0 - 2.0 * s);
-                let alpha = (smooth * 256.0).round().clamp(0.0, 256.0) as u32;
-                let inv = 256 - alpha;
-                self.cover_blend_buf.resize(target_bytes.len(), 0);
-                for ((dst, &p), &n) in self
-                    .cover_blend_buf
-                    .iter_mut()
-                    .zip(prev.iter())
-                    .zip(target_bytes.iter())
-                {
-                    *dst = ((u32::from(p) * inv + u32::from(n) * alpha) >> 8) as u8;
-                }
-                self.cover_blend_buf.as_slice()
-            } else {
-                self.cover_fade = 1.0;
-                self.prev_cover_rgba = None;
-                self.cover_blend_buf = Vec::new();
-                target_bytes
-            }
-        } else {
-            self.prev_cover_rgba = None;
-            self.cover_blend_buf = Vec::new();
-            target_bytes
-        };
-        if let Some(handle) = self.cover_surface {
-            if let Err(error) = window.update_custom_surface(handle, bytes) {
-                log::warn!("cover surface update: {error:#}");
-            }
-        } else {
             match window.create_custom_surface(cover.width, cover.height, bytes) {
                 Ok(handle) => {
                     self.cover_surface = Some(handle);
                     self.cover_size = (cover.width, cover.height);
                 }
-                Err(error) => log::warn!("cover surface: {error:#}"),
+                Err(error) => {
+                    log::warn!("cover surface: {error:#}");
+                    self.cover_fade = 1.0;
+                }
+            }
+        }
+        if self.cover_fade < 1.0 {
+            self.cover_fade = (self.cover_fade + (dt_ms.clamp(0.0, 100.0) as f32 / 550.0)).min(1.0);
+        }
+        if self.cover_fade >= 1.0 {
+            if let Some(old_prev) = self.prev_cover_surface.take() {
+                window.destroy_custom_surface(old_prev);
             }
         }
     }
