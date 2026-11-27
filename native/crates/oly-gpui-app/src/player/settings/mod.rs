@@ -201,10 +201,32 @@ impl Settings {
                 .filter_map(|id| Self::source_item_for(id))
                 .collect();
             rows.splice(0..0, source_rows);
-            if self.has_local_lyrics {
-                if let Some(pos) = rows.iter().position(|item| item.key == "lyrics.lyricsCacheMB") {
+            if let Some(pos) = rows.iter().position(|item| item.key == "lyrics.lyricsCacheMB") {
+                let mut insert_at = pos + 1;
+                let has_custom_dir = self
+                    .value("lyrics.customLyricsDir")
+                    .as_str()
+                    .is_some_and(|s| !s.trim().is_empty());
+                rows.insert(
+                    insert_at,
+                    action(
+                        "action.pickCustomLyricsDir",
+                        "本地歌词扫描目录",
+                        if has_custom_dir { "更改目录" } else { "选择目录" },
+                        false,
+                    ),
+                );
+                insert_at += 1;
+                if has_custom_dir {
                     rows.insert(
-                        pos + 1,
+                        insert_at,
+                        action("action.clearCustomLyricsDir", "清除扫描目录", "清除", false),
+                    );
+                    insert_at += 1;
+                }
+                if self.has_local_lyrics {
+                    rows.insert(
+                        insert_at,
                         action("action.openCustomLyricsDir", "本地歌词保存路径", "打开目录", false),
                     );
                 }

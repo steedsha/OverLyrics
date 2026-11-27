@@ -130,6 +130,7 @@ pub struct SearchResult {
     /// The generation moved on while this search was in flight.
     pub cancelled: bool,
     pub cached: bool,
+    pub offline: bool,
 }
 
 /// Output of the cross-language rescue pass.
@@ -425,6 +426,7 @@ impl LyricsService {
                         probed,
                         cancelled: false,
                         cached: true,
+                        offline: false,
                     };
                 }
             }
@@ -438,6 +440,9 @@ impl LyricsService {
         let variants = title_variants(&track.title);
         let mut all_probed=true;
 
+        let mut network_failures: usize = 0;
+        let total_sources = ids.len();
+
         // Independent providers run together; only this collector publishes shared state.
         std::thread::scope(|scope| {
             let (sender, receiver)=std::sync::mpsc::channel();
@@ -447,6 +452,7 @@ impl LyricsService {
                 scope.spawn(move || {
                     let budget=BudgetTransport::new(transport,source.search_budget_ms(),epoch,&self.cache_epoch);
                     let mut rows=Vec::new();let mut seen=BTreeSet::new();
+                    let mut transport_failed = false;
                     for variant in variants {
                         if !self.current(epoch) || budget.expired(){break;}
                         let mut query=track.clone();query.title=variant.clone();
@@ -458,7 +464,17 @@ impl LyricsService {
                                 row.match_info=Some(MatchInfo{score:score.score,percent:score.percent});
                                 row.cap_word=Some(source.supports().word);row.cap_trans=Some(source.supports().trans);rows.push(row);
                             },
-                            Err(error)=>(self.log)(&format!("{} 搜索失败：{error}",source.name())),
+                            Err(error)=>{
+                                let is_net = matches!(
+                                    error,
+                                    crate::providers::ProviderError::Http(crate::net::HttpError::Transport(_))
+                                );
+                                (self.log)(&format!("{} 搜索失败：{error}",source.name()));
+                                if is_net && rows.is_empty() {
+                                    transport_failed = true;
+                                    break;
+                                }
+                            }
                         }
                         if rows.iter().filter(|row| identity_gate(row, track)).count() >= VARIANT_CANDIDATES_PER_SOURCE {
                             break;
@@ -466,15 +482,22 @@ impl LyricsService {
                     }
                     rows.retain(|row|identity_gate(row,track));
                     rows.sort_by(|a,b|b.match_info.map(|m|m.score).unwrap_or(0.).partial_cmp(&a.match_info.map(|m|m.score).unwrap_or(0.)).unwrap_or(std::cmp::Ordering::Equal));
-                    let probe_total_ms = PROBE_TOTAL_BUDGET_MS.max(source.probe_budget_ms());
-                    let probe_budget=BudgetTransport::new(transport,probe_total_ms,epoch,&self.cache_epoch);
-                    let probed=self.probe_round(&probe_budget,track,&mut rows,epoch);
-                    let _=sender.send(((*id).to_string(),rows,probed));
+                    let probed = if transport_failed && rows.is_empty() {
+                        false
+                    } else {
+                        let probe_total_ms = PROBE_TOTAL_BUDGET_MS.max(source.probe_budget_ms());
+                        let probe_budget=BudgetTransport::new(transport,probe_total_ms,epoch,&self.cache_epoch);
+                        self.probe_round(&probe_budget,track,&mut rows,epoch)
+                    };
+                    let _=sender.send(((*id).to_string(),rows,probed,transport_failed));
                 });
             }
             drop(sender);
-            for (id,rows,probed) in receiver {
+            for (id,rows,probed,transport_failed) in receiver {
                 if !self.current(epoch){continue;}
+                if transport_failed && rows.is_empty() {
+                    network_failures += 1;
+                }
                 for row in rows {
                     if seen.insert(format!("{id}\u{1}{}",row.id)){out.push(row);}
                 }
@@ -484,6 +507,7 @@ impl LyricsService {
             }
         });
         if !self.current(epoch){return SearchResult{cancelled:true,..Default::default()};}
+        let offline = total_sources > 0 && network_failures == total_sources && out.is_empty();
 
         out.sort_by(|a, b| {
             let left = b.match_info.map(|m| m.score).unwrap_or(0.0);
@@ -507,7 +531,7 @@ impl LyricsService {
         };
         self.store(&key, entry, probed);
         self.publish(&key, "ready", Some(list.clone()), Some(completed), None);
-        SearchResult { list, probed, cancelled: false, cached: false }
+        SearchResult { list, probed, cancelled: false, cached: false, offline }
     }
 
     /// Cross-language rescue: when a track has an English title or romanized artist
@@ -1192,11 +1216,12 @@ impl LyricsService {
             if persist {
                 self.save_source_memory();
             }
+            let doc_id = chosen_id(&final_doc, &attempt.id);
             {
                 let mut docs = Self::lock(&self.last_chosen_docs);
                 docs.insert(
                     key.clone(),
-                    (source_id.to_string(), chosen_id(&final_doc, &attempt.id), final_doc.clone()),
+                    (source_id.to_string(), doc_id.clone(), final_doc.clone()),
                 );
                 while docs.len() > 16 {
                     if let Some(oldest) = docs.keys().next().cloned() {
@@ -1206,6 +1231,14 @@ impl LyricsService {
                     }
                 }
             }
+            // Persist validated online lyric doc asynchronously right away (respecting lyricsCacheMB)
+            // so offline reuse does not depend on playing past 50%.
+            self.save_cached_doc_async(
+                key.clone(),
+                source_id.to_string(),
+                doc_id,
+                final_doc.clone(),
+            );
             (self.log)(&format!(
                 "已记住：[{}] {source_id} key={}{}",
                 track.title,
@@ -1342,9 +1375,17 @@ impl LyricsService {
     }
 
     fn doc_cache_path(&self, key: &str, source_id: &str, id: &str) -> PathBuf {
-        let h1 = fnv1a64(&[key.as_bytes(), b"\x01", source_id.as_bytes(), b"\x01", id.as_bytes()]);
-        let h2 = fnv1a64(&[id.as_bytes(), b"\x02", source_id.as_bytes(), b"\x02", key.as_bytes()]);
-        self.doc_cache_dir().join(format!("{h1:016x}{h2:016x}.json"))
+        doc_cache_path_in(&self.doc_cache_dir(), key, source_id, id)
+    }
+
+    fn track_cache_ref_path(&self, key: &str) -> PathBuf {
+        track_cache_ref_path_in(&self.doc_cache_dir(), key)
+    }
+
+    fn save_cached_doc_async(&self, key: String, source_id: String, id: String, doc: Value) {
+        let dir = self.doc_cache_dir();
+        let limit = self.doc_cache_limit_bytes();
+        write_cached_doc_files(&dir, limit, &key, &source_id, &id, &doc);
     }
 
     fn save_cached_doc_for(&self, key: &str, source_id: &str, id: &str) -> bool {
@@ -1357,30 +1398,30 @@ impl LyricsService {
         let Some(doc) = doc else {
             return false;
         };
-        let dir = self.doc_cache_dir();
-        if std::fs::create_dir_all(&dir).is_err() {
-            return false;
+        write_cached_doc_files(
+            &self.doc_cache_dir(),
+            self.doc_cache_limit_bytes(),
+            key,
+            source_id,
+            id,
+            &doc,
+        )
+    }
+
+    /// O(1) lookup for the most recently cached lyric doc for `track`,
+    /// regardless of whether it was auto-picked or manually selected.
+    pub fn load_any_cached_doc(&self, track: &Track) -> Option<(String, String, Value)> {
+        let key = track_key(track);
+        let ref_path = self.track_cache_ref_path(&key);
+        let text = std::fs::read_to_string(&ref_path).ok()?;
+        let parsed: Value = serde_json::from_str(&text).ok()?;
+        if parsed.get("trackKey").and_then(Value::as_str) != Some(key.as_str()) {
+            return None;
         }
-        let payload = serde_json::json!({
-            "trackKey": key,
-            "source": source_id,
-            "id": id,
-            "doc": doc,
-        });
-        let Ok(bytes) = serde_json::to_vec(&payload) else {
-            return false;
-        };
-        let path = self.doc_cache_path(key, source_id, id);
-        let tmp = path.with_extension("tmp");
-        if std::fs::write(&tmp, bytes).is_err() {
-            return false;
-        }
-        if std::fs::rename(&tmp, &path).is_err() {
-            let _ = std::fs::remove_file(&tmp);
-            return false;
-        }
-        enforce_doc_cache_budget(&dir, self.doc_cache_limit_bytes());
-        true
+        let source = parsed.get("source").and_then(Value::as_str)?.to_string();
+        let id = parsed.get("id").and_then(Value::as_str)?.to_string();
+        let doc = self.load_cached_doc(track, &source, &id)?;
+        Some((source, id, doc))
     }
 
     pub fn load_cached_doc(&self, track: &Track, source_id: &str, id: &str) -> Option<Value> {
@@ -1446,6 +1487,64 @@ fn fnv1a64(parts: &[&[u8]]) -> u64 {
         }
     }
     hash
+}
+
+fn doc_cache_path_in(dir: &Path, key: &str, source_id: &str, id: &str) -> PathBuf {
+    let h1 = fnv1a64(&[key.as_bytes(), b"\x01", source_id.as_bytes(), b"\x01", id.as_bytes()]);
+    let h2 = fnv1a64(&[id.as_bytes(), b"\x02", source_id.as_bytes(), b"\x02", key.as_bytes()]);
+    dir.join(format!("{h1:016x}{h2:016x}.json"))
+}
+
+fn track_cache_ref_path_in(dir: &Path, key: &str) -> PathBuf {
+    let h = fnv1a64(&[b"tk\x01", key.as_bytes()]);
+    dir.join(format!("tk-{h:016x}.ref"))
+}
+
+fn write_cached_doc_files(
+    dir: &Path,
+    limit_bytes: u64,
+    key: &str,
+    source_id: &str,
+    id: &str,
+    doc: &Value,
+) -> bool {
+    if std::fs::create_dir_all(dir).is_err() {
+        return false;
+    }
+    let payload = serde_json::json!({
+        "trackKey": key,
+        "source": source_id,
+        "id": id,
+        "doc": doc,
+    });
+    let Ok(bytes) = serde_json::to_vec(&payload) else {
+        return false;
+    };
+    let path = doc_cache_path_in(dir, key, source_id, id);
+    let tmp = path.with_extension("tmp");
+    if std::fs::write(&tmp, bytes).is_err() {
+        return false;
+    }
+    if std::fs::rename(&tmp, &path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return false;
+    }
+    let ref_payload = serde_json::json!({
+        "trackKey": key,
+        "source": source_id,
+        "id": id,
+    });
+    if let Ok(ref_bytes) = serde_json::to_vec(&ref_payload) {
+        let ref_path = track_cache_ref_path_in(dir, key);
+        let ref_tmp = ref_path.with_extension("tmp");
+        if std::fs::write(&ref_tmp, ref_bytes).is_ok() {
+            if std::fs::rename(&ref_tmp, &ref_path).is_err() {
+                let _ = std::fs::remove_file(&ref_tmp);
+            }
+        }
+    }
+    enforce_doc_cache_budget(dir, limit_bytes);
+    true
 }
 
 fn enforce_doc_cache_budget(dir: &Path, limit_bytes: u64) {

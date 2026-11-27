@@ -41,7 +41,52 @@ pub fn pick_lyric_file() -> Option<PathBuf> {
     }
 }
 
+/// Opens a native Windows folder picker dialog (`IFileOpenDialog` + `FOS_PICKFOLDERS`).
+#[cfg(windows)]
+pub fn pick_lyrics_folder() -> Option<PathBuf> {
+    use windows::Win32::System::Com::{
+        CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
+        CoTaskMemFree, CoUninitialize,
+    };
+    use windows::Win32::UI::Shell::{
+        FOS_FORCEFILESYSTEM, FOS_NOCHANGEDIR, FOS_PATHMUSTEXIST, FOS_PICKFOLDERS, FileOpenDialog,
+        IFileOpenDialog, SIGDN_FILESYSPATH,
+    };
+
+    unsafe {
+        let init_hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let need_uninit = init_hr.is_ok();
+        let res = (|| -> Option<PathBuf> {
+            let dialog: IFileOpenDialog =
+                CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+            let opts = dialog.GetOptions().ok()?;
+            dialog
+                .SetOptions(
+                    opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_NOCHANGEDIR,
+                )
+                .ok()?;
+            let title: Vec<u16> = "选择本地歌词目录\0".encode_utf16().collect();
+            let _ = dialog.SetTitle(windows::core::PCWSTR(title.as_ptr()));
+            dialog.Show(None).ok()?;
+            let item = dialog.GetResult().ok()?;
+            let pwstr = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+            let text = pwstr.to_string().ok();
+            CoTaskMemFree(Some(pwstr.0 as *const std::ffi::c_void));
+            text.filter(|s| !s.trim().is_empty()).map(PathBuf::from)
+        })();
+        if need_uninit {
+            CoUninitialize();
+        }
+        res
+    }
+}
+
 #[cfg(not(windows))]
 pub fn pick_lyric_file() -> Option<PathBuf> {
+    None
+}
+
+#[cfg(not(windows))]
+pub fn pick_lyrics_folder() -> Option<PathBuf> {
     None
 }

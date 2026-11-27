@@ -33,6 +33,7 @@ pub mod decrypt;
 pub mod doc;
 pub mod hd_cover;
 pub mod identity;
+pub mod local_folder;
 pub mod matching;
 pub mod motion_cover;
 pub mod net;

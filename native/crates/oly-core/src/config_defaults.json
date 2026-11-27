@@ -230,6 +230,7 @@
     "sourcesPruned": 3,
     "matchThreshold": 70,
     "lyricsCacheMB": 50,
+    "customLyricsDir": "",
     "playerSyncOffsets": {
       "apple": 0,
       "default": 0

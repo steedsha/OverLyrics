@@ -352,7 +352,7 @@ pub fn check_latest_sync() -> Result<Option<ReleaseInfo>, String> {
     let website_err = match oly_platform_win::http::get_text(
         WEBSITE_MANIFEST_URL,
         &[("Accept", "application/json")],
-        6_000,
+        5_000,
     ) {
         Ok(body) => {
             if let Some(info) = parse_website_manifest(&body) {
@@ -362,6 +362,15 @@ pub fn check_latest_sync() -> Result<Option<ReleaseInfo>, String> {
         }
         Err(e) => e,
     };
+    let lower = website_err.to_ascii_lowercase();
+    if lower.contains("dns")
+        || lower.contains("no such host")
+        || lower.contains("unreachable")
+        || lower.contains("network")
+        || lower.contains("connection refused")
+    {
+        return Err("当前无网络，请稍后重试".to_string());
+    }
     log::info!("[updater] website check unavailable ({website_err}), falling back to GitHub");
     let gh_body = oly_platform_win::http::get_text(
         GITHUB_LATEST_API,
@@ -369,7 +378,7 @@ pub fn check_latest_sync() -> Result<Option<ReleaseInfo>, String> {
             ("Accept", "application/vnd.github+json"),
             ("User-Agent", concat!("OverLyrics/", env!("CARGO_PKG_VERSION"))),
         ],
-        8_000,
+        6_000,
     )
     .map_err(|e| format!("官网({website_err}) / GitHub({e})"))?;
     let info = parse_github_release(&gh_body).ok_or_else(|| "GitHub 发布信息解析失败".to_string())?;

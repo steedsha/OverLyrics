@@ -302,7 +302,7 @@ impl Render for PlayerView {
             self.settings.has_local_lyrics = self
                 .live
                 .as_ref()
-                .is_some_and(|l| l.custom_lyrics.has_any());
+                .is_some_and(|l| l.custom_lyrics.has_any() || l.local_folder.has_any());
         }
         self.settings.tick(now);
         if let Some(host)=self.settings_host.as_mut(){

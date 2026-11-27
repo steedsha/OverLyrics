@@ -182,8 +182,8 @@ fn worker_keeps_only_latest_pending_track_and_builds_a_real_render_document() {
     assert!(manual.doc.is_some(), "{}", manual.error);
     let saved = std::fs::read_to_string(dir.join("source-memory.json")).unwrap();
     assert!(saved.contains("Latest Song"));
-    std::fs::remove_file(dir.join("source-memory.json")).unwrap();
-    std::fs::remove_dir(&dir).unwrap();
+    assert!(dir.join("lyrics-cache").exists(), "validated lyrics should be cached immediately");
+    std::fs::remove_dir_all(&dir).unwrap();
 }
 #[test]
 fn stale_scheduled_epoch_never_starts_a_search() {

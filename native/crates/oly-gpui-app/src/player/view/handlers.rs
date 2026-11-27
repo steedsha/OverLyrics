@@ -56,6 +56,26 @@ impl PlayerView {
             return (String::new(), None);
         };
         match action {
+            "action.pickCustomLyricsDir" => {
+                if self.pending_folder_rx.is_none() {
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    self.pending_folder_rx = Some(rx);
+                    std::thread::Builder::new()
+                        .name("lyric-folder-dialog".into())
+                        .spawn(move || {
+                            let _ = tx.send(oly_platform_win::file_dialog::pick_lyrics_folder());
+                        })
+                        .ok();
+                }
+                ("正在打开目录选择器…".into(), None)
+            }
+            "action.clearCustomLyricsDir" => {
+                if let Some(live) = self.live.as_ref() {
+                    live.local_folder.set_dir(None);
+                }
+                self.change_setting("lyrics.customLyricsDir", serde_json::json!(""));
+                ("已清除本地歌词扫描目录".into(), None)
+            }
             "action.openCustomLyricsDir" => {
                 let dir = live.custom_lyrics.root_dir().to_path_buf();
                 let _ = std::fs::create_dir_all(&dir);
@@ -248,6 +268,31 @@ impl PlayerView {
                             candidate_index: 0,
                             selected,
                         });
+                    }
+                    if let Some(track) = live.track.as_ref() {
+                        let threshold = self
+                            .settings
+                            .config
+                            .pointer("/lyrics/matchThreshold")
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(70.0);
+                        for m in live.local_folder.matches_for(track, threshold) {
+                            let selected = identity.is_some_and(|(s, id)| s == "custom" && id == m.id);
+                            custom_rows.push(PickerEntry {
+                                title: format!("{} · 本地目录", m.file_name),
+                                subtitle: format!("{} · {} 行", m.ext.to_uppercase(), m.line_count),
+                                match_badge: format!("{}%", m.percent.round() as i32),
+                                timing_badge: m.word_timed.then_some("逐字"),
+                                has_translation: m.has_translation,
+                                smart_translation: false,
+                                smart_translation_key: String::new(),
+                                path: m.path,
+                                source: "custom".into(),
+                                id: m.id,
+                                candidate_index: 0,
+                                selected,
+                            });
+                        }
                     }
                 }
             }

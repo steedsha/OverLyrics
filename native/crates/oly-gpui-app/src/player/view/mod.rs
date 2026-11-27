@@ -77,6 +77,7 @@ pub struct PlayerView {
     pending_settings_after_mode: bool,
     sync_settings_child_config: bool,
     pending_import_rx: Option<std::sync::mpsc::Receiver<Option<PathBuf>>>,
+    pending_folder_rx: Option<std::sync::mpsc::Receiver<Option<PathBuf>>>,
     native_background: Option<bool>,
     doc_auto_picked: bool,
     auto_pick_persisted: bool,
@@ -311,7 +312,7 @@ impl PlayerView {
         } else {
             None
         };
-        let mut this = Self {settings_host:None,settings_child:None,settings_child_view:None,desktop_child:None,desktop_bridge:super::desktop_lyrics::SharedDesktopBridge::new(),desktop_candidates_cache:Arc::new(Vec::new()),desktop_candidates_next_ms:0.0,pending_desktop_lyrics:false,main_hwnd:None,tray,tray_menu:None,tray_bridge:tray_bridge.clone(),close_dialog:None,close_dialog_bridge:super::close_dialog::SharedCloseDialogBridge::new(),pending_close_dialog:false,pending_minimize_to_tray:false,pending_settings_window:None,pending_settings_after_mode:false,sync_settings_child_config:false,pending_import_rx:None,native_background:None,doc_auto_picked:false,auto_pick_persisted:false,qa_frame_sample:None,smart_translation_worker:None,translation_signature:None,translated_rows:Vec::new(),search_config:None,priority_config:None,pressed_candidate:None,
+        let mut this = Self {settings_host:None,settings_child:None,settings_child_view:None,desktop_child:None,desktop_bridge:super::desktop_lyrics::SharedDesktopBridge::new(),desktop_candidates_cache:Arc::new(Vec::new()),desktop_candidates_next_ms:0.0,pending_desktop_lyrics:false,main_hwnd:None,tray,tray_menu:None,tray_bridge:tray_bridge.clone(),close_dialog:None,close_dialog_bridge:super::close_dialog::SharedCloseDialogBridge::new(),pending_close_dialog:false,pending_minimize_to_tray:false,pending_settings_window:None,pending_settings_after_mode:false,sync_settings_child_config:false,pending_import_rx:None,pending_folder_rx:None,native_background:None,doc_auto_picked:false,auto_pick_persisted:false,qa_frame_sample:None,smart_translation_worker:None,translation_signature:None,translated_rows:Vec::new(),search_config:None,priority_config:None,pressed_candidate:None,
             cfg,
             focus: cx.focus_handle(),
             scene: None,
@@ -811,6 +812,44 @@ impl PlayerView {
             self.scroll = ScrollSurface::new(); self.follow = model::FollowMotion::default();
             self.group_motion.clear(); self.group_bg_slide.clear(); self.group_bg_alpha.clear(); self.group_passed_alpha.clear();
             self.main_scale.clear(); self.bg_scale.clear(); self.picked = usize::MAX;
+            // Local-first 0ms display: if local custom or scanned folder lyrics match this track,
+            // render immediately without waiting for online providers.
+            if !idle_reset {
+                let custom_enabled = self
+                    .settings
+                    .config
+                    .pointer("/lyrics/enabledSources/custom")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+                if custom_enabled {
+                    let threshold = self
+                        .settings
+                        .config
+                        .pointer("/lyrics/matchThreshold")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(70.0);
+                    let local_hit = self.live.as_ref().and_then(|live| {
+                        let tk = live.model.packet.as_ref().map(|p| p.track_key()).unwrap_or_default();
+                        if let Some(entry) = live.custom_lyrics.entries_for(&tk).first() {
+                            return Some((entry.id.clone(), entry.doc()));
+                        }
+                        if let Some(track) = live.track.as_ref() {
+                            if let Some(m) = live.local_folder.matches_for(track, threshold).into_iter().next() {
+                                return Some((m.id, m.doc));
+                            }
+                        }
+                        None
+                    });
+                    if let Some((id, doc)) = local_hit {
+                        self.doc_auto_picked = false;
+                        self.auto_pick_persisted = false;
+                        self.doc_identity = Some(("custom".into(), id));
+                        self.doc_provider = "custom".into();
+                        self.lyrics_auto_hidden = doc.instrumental;
+                        self.install_document(doc, false);
+                    }
+                }
+            }
         }
         if let Some(answer) = answer {
             let defer_refresh_update = self.picker_refresh_active && answer.searching;
@@ -882,9 +921,11 @@ impl PlayerView {
                     self.doc_provider=answer.provider;
                     self.lyrics_auto_hidden = doc.instrumental;
                     if !unchanged{self.install_document(doc, false);}
-                } else if no_candidates
+                } else if (no_candidates
                     || answer.error == "未找到匹配歌词"
-                    || !any_lyric_source_enabled(&self.settings.config)
+                    || answer.error == "当前无网络或未找到匹配歌词"
+                    || !any_lyric_source_enabled(&self.settings.config))
+                    && self.doc.is_none()
                 {
                     self.lyrics_auto_hidden = true;
                 }
@@ -982,6 +1023,23 @@ impl PlayerView {
                 Ok(None) => {}
                 Err(std::sync::mpsc::TryRecvError::Empty) => {
                     self.pending_import_rx = Some(rx);
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
+            }
+        }
+        if let Some(rx) = self.pending_folder_rx.take() {
+            match rx.try_recv() {
+                Ok(Some(dir)) => {
+                    let dir_str = dir.to_string_lossy().to_string();
+                    self.change_setting("lyrics.customLyricsDir", serde_json::json!(dir_str));
+                    if let Some(live) = self.live.as_ref() {
+                        live.local_folder.set_dir(Some(dir));
+                    }
+                    self.settings.status = "已设置本地歌词扫描目录，正在后台建立索引…".into();
+                }
+                Ok(None) => {}
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    self.pending_folder_rx = Some(rx);
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
             }
@@ -2346,7 +2404,7 @@ impl PlayerView {
         let page=0;
         let profile=self.settings.active_profile();
         let active_player=self.settings.active_player.clone();
-        let has_local_lyrics = self.live.as_ref().is_some_and(|l| l.custom_lyrics.has_any());
+        let has_local_lyrics = self.live.as_ref().is_some_and(|l| l.custom_lyrics.has_any() || l.local_folder.has_any());
         if let Some(child)=self.settings_child {
             if child.update(cx,|_,w,_|{w.set_window_title(win_title);w.set_bounds(gpui_kit::bounds(point(px(rect.x),px(rect.y)),size(px(rect.w),px(rect.h))));w.activate_window();}).is_ok(){
                 if let Some(view)=&self.settings_child_view{let _=view.update(cx,|v,cx|{v.settings.profile=profile;v.settings.active_player=active_player;v.settings.has_local_lyrics=has_local_lyrics;v.settings.set_kind(kind);v.settings.open=true;v.settings.page=page;v.settings.title=sheet_title;v.settings.set_scroll_immediate(0.0);v.settings.close_choice();v.sync_profile_display();cx.notify();});}
@@ -2571,7 +2629,7 @@ impl PlayerView {
         let (sw, sh) = (540.0_f32, 440.0_f32);
         let profile = self.settings.active_profile();
         let active_player = self.settings.active_player.clone();
-        let has_local_lyrics = self.live.as_ref().is_some_and(|l| l.custom_lyrics.has_any());
+        let has_local_lyrics = self.live.as_ref().is_some_and(|l| l.custom_lyrics.has_any() || l.local_folder.has_any());
         let (dx, dy, dw, dh, display_id) = cx
             .displays()
             .into_iter()
@@ -3065,11 +3123,11 @@ impl PlayerView {
             return;
         }
         if let Some(custom_entry) = visible.get(i).filter(|r| r.source == "custom") {
-            if let Some(doc) = self
-                .live
-                .as_ref()
-                .and_then(|l| l.custom_lyrics.get_doc(&custom_entry.id))
-            {
+            if let Some(doc) = self.live.as_ref().and_then(|l| {
+                l.custom_lyrics
+                    .get_doc(&custom_entry.id)
+                    .or_else(|| l.local_folder.get_doc(&custom_entry.id))
+            }) {
                 self.doc_auto_picked = false;
                 self.auto_pick_persisted = false;
                 self.doc_identity = Some(("custom".into(), custom_entry.id.clone()));

@@ -644,6 +644,44 @@ impl SearchWorker {
                                 }
                             }
                         }
+                        if !cached_doc_on_screen {
+                            if let Some((source, id, value)) = engine.load_any_cached_doc(&job.track) {
+                                let provider = value
+                                    .get("provider")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(&source)
+                                    .to_string();
+                                if let Ok(doc) = serde_json::from_value::<oly_contracts::lyrics::LyricDoc>(value) {
+                                    let verified = verified_from_lyric_doc(&doc);
+                                    let actual_pick = Candidate {
+                                        source: source.clone(),
+                                        id: id.clone(),
+                                        title: job.track.title.clone(),
+                                        artist: job.track.artist.clone(),
+                                        percent: Some(100.0),
+                                        verified: Some(verified),
+                                        ..Default::default()
+                                    };
+                                    delivered_pick = Some(actual_pick.clone());
+                                    cached_doc_on_screen = true;
+                                    if engine.epoch() == job.epoch {
+                                        *out.lock().unwrap_or_else(|e| e.into_inner()) = Some(SearchAnswer {
+                                            generation: job.generation,
+                                            epoch: job.epoch,
+                                            auto_picked: true,
+                                            manual: false,
+                                            searching: true,
+                                            provider,
+                                            selected: Some((source, id)),
+                                            failed_pick: None,
+                                            candidates: vec![actual_pick],
+                                            doc: Some(doc),
+                                            error: String::new(),
+                                        });
+                                    }
+                                }
+                            }
+                        }
                         let mut progress = |pool: &[Candidate]| {
                             if engine.epoch() != job.epoch || remembered_hit_locked {
                                 return;
@@ -766,7 +804,8 @@ impl SearchWorker {
                         }
                         rows = found.list;
                         let initial_judge = oly_engine::arbiter::judge_with_policy(&rows, &job.track, threshold, &policy);
-                        let needs_rescue = initial_judge.best_grade < oly_engine::arbiter::GRADE_WORD
+                        let needs_rescue = !found.offline
+                            && initial_judge.best_grade < oly_engine::arbiter::GRADE_WORD
                             && (!oly_engine::crosslang::CJK_RE.is_match(&job.track.title)
                                 || !oly_engine::crosslang::CJK_RE.is_match(&raw_artist));
                         if needs_rescue {
@@ -908,7 +947,14 @@ impl SearchWorker {
                             }
                         }
                     } else {
-                        (None, "未找到匹配歌词".into())
+                        (
+                            None,
+                            if !manual && rows.is_empty() && delivered_pick.is_none() {
+                                "当前无网络或未找到匹配歌词".into()
+                            } else {
+                                "未找到匹配歌词".into()
+                            },
+                        )
                     };
                     if engine.epoch() == job.epoch {
                         *out.lock().unwrap_or_else(|e| e.into_inner()) = Some(SearchAnswer {
@@ -1213,6 +1259,7 @@ pub struct LiveSession {
     pub artwork: ArtworkWorker,
     pub motion: MotionWorker,
     pub custom_lyrics: oly_engine::custom_lyrics::CustomLyricsStore,
+    pub local_folder: oly_engine::local_folder::LocalFolderScanner,
     pub media_sessions: Vec<oly_platform_win::smtc::MediaSessionInfo>,
     pub pinned_media_app: Option<String>,
     cover_requested: Option<(u64, Option<String>)>,
@@ -1294,6 +1341,13 @@ impl LiveSession {
             inbox.clone(),
         )))
         .ok_or_else(|| anyhow::anyhow!("SMTC worker already claimed"))?;
+        let local_folder_dir = config
+            .get()
+            .pointer("/lyrics/customLyricsDir")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .map(std::path::PathBuf::from);
         Ok(Self {
             config,
             model: LiveModel::default(),
@@ -1306,6 +1360,7 @@ impl LiveSession {
             artwork: ArtworkWorker::start_with_hd(root.as_path().join("cover-cache")),
             motion: MotionWorker::start(root.as_path().join("motion-cache")),
             custom_lyrics: oly_engine::custom_lyrics::CustomLyricsStore::load(root.as_path()),
+            local_folder: oly_engine::local_folder::LocalFolderScanner::new(local_folder_dir),
             media_sessions: Vec::new(),
             pinned_media_app: None,
             cover_requested: None,
