@@ -12,7 +12,8 @@
     "alwaysOnTop": false,
     "fullscreen": false,
     "topDefaultMigrated": false,
-    "closeAction": "ask"
+    "closeAction": "ask",
+    "wallpaperDisplay": "primary"
   },
   "display": {
     "fontSize": 68,

@@ -38,6 +38,7 @@ pub enum TrayAction {
     ShowMain,
     ToggleDesktopLyrics,
     ToggleDesktopLock,
+    ToggleWallpaper,
     OpenSettings,
     Quit,
 }
@@ -49,6 +50,7 @@ pub struct TrayMenuSnapshot {
     pub accent_hex: u32,
     pub desktop_open: bool,
     pub desktop_locked: bool,
+    pub wallpaper_open: bool,
 }
 
 impl Default for TrayMenuSnapshot {
@@ -59,6 +61,7 @@ impl Default for TrayMenuSnapshot {
             accent_hex: 0x0A84FF,
             desktop_open: false,
             desktop_locked: false,
+            wallpaper_open: false,
         }
     }
 }
@@ -413,7 +416,7 @@ impl TrayMenuPopover {
     }
 
     pub fn window_size(desktop_open: bool) -> (f32, f32) {
-        let card_h = if desktop_open { 206.0 } else { 170.0 };
+        let card_h = if desktop_open { 242.0 } else { 206.0 };
         (
             TRAY_MENU_CARD_W + TRAY_MENU_PAD * 2.0,
             card_h + TRAY_MENU_PAD * 2.0,
@@ -483,11 +486,13 @@ impl Render for TrayMenuPopover {
         let r_lock = snap
             .desktop_open
             .then(|| Box4::new(row_x, card.y + 80.0, row_w, row_h));
-        let div1_y = if snap.desktop_open {
-            card.y + 119.0
+        let wall_y = if snap.desktop_open {
+            card.y + 116.0
         } else {
-            card.y + 83.0
+            card.y + 80.0
         };
+        let r_wall = Box4::new(row_x, wall_y, row_w, row_h);
+        let div1_y = r_wall.bottom() + 4.0;
         let r_settings = Box4::new(row_x, div1_y + 6.0, row_w, row_h);
         let div2_y = r_settings.bottom() + 4.0;
         let r_quit = Box4::new(row_x, div2_y + 6.0, row_w, row_h);
@@ -504,6 +509,7 @@ impl Render for TrayMenuPopover {
         if let Some(rl) = r_lock {
             hits.push((TrayAction::ToggleDesktopLock, rl));
         }
+        hits.push((TrayAction::ToggleWallpaper, r_wall));
         hits.push((TrayAction::OpenSettings, r_settings));
         hits.push((TrayAction::Quit, r_quit));
         self.hits = hits.clone();
@@ -676,6 +682,20 @@ impl Render for TrayMenuPopover {
                             );
                         }
 
+                        paint_row(
+                            window,
+                            cx,
+                            TrayAction::ToggleWallpaper,
+                            r_wall,
+                            Icon::Fullscreen,
+                            if snap.wallpaper_open {
+                                "退出壁纸模式"
+                            } else {
+                                "桌面壁纸模式"
+                            },
+                            snap.wallpaper_open,
+                            false,
+                        );
                         paint_row(window, cx, TrayAction::OpenSettings, r_settings, Icon::Settings, "设置", false, false);
                         paint_row(window, cx, TrayAction::Quit, r_quit, Icon::Close, "退出", false, true);
 

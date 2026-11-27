@@ -52,6 +52,15 @@ impl PlayerView {
             }
             return ("已在浏览器中打开开源仓库".into(), None);
         }
+        if action == "action.toggleWallpaperMode" {
+            if !self.wallpaper_windows.is_empty() {
+                self.pending_wallpaper_exit = true;
+                return ("正在退出桌面壁纸模式…".into(), None);
+            } else {
+                self.pending_wallpaper_enter = true;
+                return ("正在进入桌面壁纸模式…".into(), None);
+            }
+        }
         let Some(live) = self.live.as_ref() else {
             return (String::new(), None);
         };

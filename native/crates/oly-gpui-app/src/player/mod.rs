@@ -37,3 +37,4 @@ pub mod win32_window;
 pub mod desktop_lyrics;
 pub mod tray;
 pub mod close_dialog;
+pub mod wallpaper;

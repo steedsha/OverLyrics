@@ -73,6 +73,14 @@ pub struct PlayerView {
     close_dialog_bridge: Arc<super::close_dialog::SharedCloseDialogBridge>,
     pending_close_dialog: bool,
     pending_minimize_to_tray: bool,
+    wallpaper_windows: Vec<AnyWindowHandle>,
+    wallpaper_control_bar: Option<AnyWindowHandle>,
+    wallpaper_bridge: Arc<super::wallpaper::SharedWallpaperBridge>,
+    wallpaper_taskbar_listener: Option<super::wallpaper::win32_workerw::TaskbarCreatedListener>,
+    pending_wallpaper_enter: bool,
+    pending_wallpaper_exit: bool,
+    wallpaper_cover_arc: Option<Arc<Cover>>,
+    wallpaper_cover_sig: u64,
     pending_settings_window:Option<usize>,
     pending_settings_after_mode: bool,
     sync_settings_child_config: bool,
@@ -312,7 +320,7 @@ impl PlayerView {
         } else {
             None
         };
-        let mut this = Self {settings_host:None,settings_child:None,settings_child_view:None,desktop_child:None,desktop_bridge:super::desktop_lyrics::SharedDesktopBridge::new(),desktop_candidates_cache:Arc::new(Vec::new()),desktop_candidates_next_ms:0.0,pending_desktop_lyrics:false,main_hwnd:None,tray,tray_menu:None,tray_bridge:tray_bridge.clone(),close_dialog:None,close_dialog_bridge:super::close_dialog::SharedCloseDialogBridge::new(),pending_close_dialog:false,pending_minimize_to_tray:false,pending_settings_window:None,pending_settings_after_mode:false,sync_settings_child_config:false,pending_import_rx:None,pending_folder_rx:None,native_background:None,doc_auto_picked:false,auto_pick_persisted:false,qa_frame_sample:None,smart_translation_worker:None,translation_signature:None,translated_rows:Vec::new(),search_config:None,priority_config:None,pressed_candidate:None,
+        let mut this = Self {settings_host:None,settings_child:None,settings_child_view:None,desktop_child:None,desktop_bridge:super::desktop_lyrics::SharedDesktopBridge::new(),desktop_candidates_cache:Arc::new(Vec::new()),desktop_candidates_next_ms:0.0,pending_desktop_lyrics:false,main_hwnd:None,tray,tray_menu:None,tray_bridge:tray_bridge.clone(),close_dialog:None,close_dialog_bridge:super::close_dialog::SharedCloseDialogBridge::new(),pending_close_dialog:false,pending_minimize_to_tray:false,wallpaper_windows:Vec::new(),wallpaper_control_bar:None,wallpaper_bridge:super::wallpaper::SharedWallpaperBridge::new(),wallpaper_taskbar_listener:None,pending_wallpaper_enter:false,pending_wallpaper_exit:false,wallpaper_cover_arc:None,wallpaper_cover_sig:0,pending_settings_window:None,pending_settings_after_mode:false,sync_settings_child_config:false,pending_import_rx:None,pending_folder_rx:None,native_background:None,doc_auto_picked:false,auto_pick_persisted:false,qa_frame_sample:None,smart_translation_worker:None,translation_signature:None,translated_rows:Vec::new(),search_config:None,priority_config:None,pressed_candidate:None,
             cfg,
             focus: cx.focus_handle(),
             scene: None,
@@ -497,13 +505,28 @@ impl PlayerView {
                     cx.background_executor()
                         .timer(std::time::Duration::from_millis(80))
                         .await;
-                    if !bridge.has_pending() {
-                        continue;
-                    }
+                    let tray_pending = bridge.has_pending();
                     let alive = weak
                         .update(cx, |pv, cx| {
-                            pv.handle_tray_pending(scale_factor, cx);
-                            cx.notify();
+                            let mut changed = false;
+                            if tray_pending {
+                                pv.handle_tray_pending(scale_factor, cx);
+                                changed = true;
+                            }
+                            if !pv.wallpaper_windows.is_empty() || pv.pending_wallpaper_exit {
+                                let now_ms = pv.now_ms();
+                                let live_now_ms = Self::live_now_ms();
+                                pv.poll_live(now_ms, live_now_ms);
+                                pv.tick_wallpaper(cx);
+                                if pv.pending_wallpaper_exit {
+                                    pv.pending_wallpaper_exit = false;
+                                    pv.exit_wallpaper_mode(cx, true);
+                                    changed = true;
+                                }
+                            }
+                            if changed {
+                                cx.notify();
+                            }
                         })
                         .is_ok();
                     if !alive {
@@ -1120,11 +1143,18 @@ impl PlayerView {
         }
         self.cover_dirty = true;
         self.cover_accent_hex = model::extract_cover_accent(&cover.rgba.pixels, cover.width, cover.height);
-        self.cover = Some(Cover {
+        let cloned = Cover {
             width: cover.width,
             height: cover.height,
             rgba: cover.rgba.clone(),
-        });
+        };
+        self.wallpaper_cover_arc = Some(Arc::new(Cover {
+            width: cover.width,
+            height: cover.height,
+            rgba: cover.rgba.clone(),
+        }));
+        self.wallpaper_cover_sig = sig.1;
+        self.cover = Some(cloned);
     }
 
     /// Re-registers the background surface when the renderer rebuilt its
@@ -2484,6 +2514,248 @@ impl PlayerView {
         }
     }
 
+    pub(super) fn sync_wallpaper_snapshot(&self) {
+        let (title, artist) = self
+            .live
+            .as_ref()
+            .and_then(|l| l.track.as_ref())
+            .map(|t| (t.title.clone(), t.artist.clone().unwrap_or_default()))
+            .unwrap_or_default();
+        let beat = super::scene::BeatConfig {
+            active: self.playing,
+            enabled: self.display.beat_follow,
+            flash_threshold: self.display.beat_flash_threshold,
+            flash_strength: self.display.beat_flash_strength,
+            wobble_threshold: self.display.beat_wobble_threshold,
+            wobble_strength: self.display.beat_wobble_strength,
+        };
+        let vol_pct = self
+            .volume_cached
+            .as_ref()
+            .map(|(_, v)| *v)
+            .unwrap_or(100.0)
+            .clamp(0.0, 100.0);
+        self.wallpaper_bridge
+            .update_snapshot(super::wallpaper::WallpaperSnapshot {
+                playing: self.playing,
+                track_title: title,
+                track_artist: artist,
+                cover: self.wallpaper_cover_arc.clone(),
+                cover_sig: self.wallpaper_cover_sig,
+                theme_mode: self.display.theme_mode,
+                corner_radius: self.display.corner_radius,
+                accent_hex: self.display.accent_hex,
+                beat,
+                volume_pct: vol_pct,
+                volume_enabled: self.live.is_some(),
+                desktop_lyrics_open: self.desktop_child.is_some(),
+            });
+    }
+
+    pub(super) fn tick_wallpaper(&mut self, cx: &mut Context<Self>) {
+        if self.wallpaper_windows.is_empty() && self.wallpaper_control_bar.is_none() {
+            return;
+        }
+        let now_ms = self.now_ms();
+        let cmds = self.wallpaper_bridge.drain_commands();
+        for cmd in cmds {
+            match cmd {
+                super::wallpaper::WallpaperCommand::Prev => {
+                    self.live_action(oly_platform_win::smtc::control::Action::Prev);
+                }
+                super::wallpaper::WallpaperCommand::PlayPause => {
+                    self.live_toggle();
+                }
+                super::wallpaper::WallpaperCommand::Next => {
+                    self.live_action(oly_platform_win::smtc::control::Action::Next);
+                }
+                super::wallpaper::WallpaperCommand::SetVolumePct(pct) => {
+                    if self.volume.app().trim().is_empty() {
+                        self.open_live_volume(now_ms);
+                    }
+                    let clamped = pct.clamp(0.0, 100.0);
+                    if self.volume.status().is_editable() {
+                        if let Some(write) = self.volume.on_slide(clamped, now_ms) {
+                            self.send_volume_write(write);
+                        }
+                    } else if let Some(app) = self
+                        .live
+                        .as_ref()
+                        .and_then(|l| l.model.packet.as_ref())
+                        .map(|p| p.app.clone())
+                        .filter(|a| !a.trim().is_empty())
+                    {
+                        self.send_volume_write(VolumeWrite {
+                            app,
+                            value: clamped,
+                            source: VolumeSource::AppMixer,
+                            generation: 0,
+                        });
+                    }
+                }
+                super::wallpaper::WallpaperCommand::ToggleDesktopLyrics => {
+                    if let Some(child) = self.desktop_child.take() {
+                        self.persist_desktop_child_bounds(child, cx);
+                        let _ = child.update(cx, |_, w, _| w.remove_window());
+                    } else {
+                        self.pending_desktop_lyrics = true;
+                    }
+                }
+                super::wallpaper::WallpaperCommand::ExitWallpaper => {
+                    self.pending_wallpaper_exit = true;
+                }
+            }
+        }
+        self.sync_wallpaper_snapshot();
+    }
+
+    pub(super) fn enter_wallpaper_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.wallpaper_windows.is_empty() {
+            return;
+        }
+        if let Some(child) = self.settings_child.take() {
+            let _ = child.update(cx, |_, w, _| w.remove_window());
+        }
+        self.settings.open = false;
+        self.picker_open = false;
+        self.tool.set_more_open(false);
+
+        let displays = cx.displays();
+        let pref = self
+            .settings
+            .value("window.wallpaperDisplay")
+            .as_str()
+            .unwrap_or("primary")
+            .to_string();
+        let mut targets = Vec::new();
+        if pref == "all" {
+            targets.extend(displays.iter().cloned());
+        } else if let Some(idx_str) = pref.strip_prefix("display:") {
+            if let Ok(idx) = idx_str.parse::<usize>() {
+                if let Some(d) = displays.get(idx) {
+                    targets.push(d.clone());
+                }
+            }
+        }
+        if targets.is_empty() {
+            if let Some(primary) = cx.primary_display().or_else(|| window.display(cx)) {
+                targets.push(primary);
+            } else if let Some(first) = displays.first() {
+                targets.push(first.clone());
+            }
+        }
+        if targets.is_empty() {
+            return;
+        }
+
+        self.wallpaper_taskbar_listener = Some(
+            super::wallpaper::win32_workerw::TaskbarCreatedListener::start(
+                self.wallpaper_bridge.clone(),
+            ),
+        );
+        self.sync_wallpaper_snapshot();
+
+        let sf = window.scale_factor().max(1.0);
+        for d in &targets {
+            let b = d.bounds();
+            let lx = f32::from(b.origin.x);
+            let ly = f32::from(b.origin.y);
+            let lw = f32::from(b.size.width).max(1.0);
+            let lh = f32::from(b.size.height).max(1.0);
+            let phys_rect = (
+                (lx * sf).round() as i32,
+                (ly * sf).round() as i32,
+                (lw * sf).round().max(1.0) as i32,
+                (lh * sf).round().max(1.0) as i32,
+            );
+            let options = WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(gpui_kit::bounds(
+                    point(px(lx), px(ly)),
+                    size(px(lw), px(lh)),
+                ))),
+                titlebar: Some(TitlebarOptions {
+                    title: Some("OverLyrics Wallpaper".into()),
+                    appears_transparent: true,
+                    traffic_light_position: None,
+                }),
+                window_background: WindowBackgroundAppearance::Opaque,
+                is_resizable: false,
+                is_minimizable: false,
+                focus: false,
+                display_id: Some(d.id()),
+                ..Default::default()
+            };
+            let bridge = self.wallpaper_bridge.clone();
+            if let Ok((child, _)) = gpui_kit::open_window(options, cx, move |_, cx| {
+                cx.new(|_| super::wallpaper::bg_view::WallpaperBgView::new(bridge, phys_rect))
+            }) {
+                self.wallpaper_windows.push(child);
+            }
+        }
+
+        // Spawn top-center edge-docked auto-hide floating glass control bar on primary display.
+        if let Some(primary) = cx.primary_display().or_else(|| targets.first().cloned()) {
+            let pb = primary.bounds();
+            let bar_w = super::wallpaper::control_bar::CONTROL_BAR_W;
+            let bar_h = super::wallpaper::control_bar::CONTROL_BAR_H;
+            let bx = f32::from(pb.origin.x) + (f32::from(pb.size.width) - bar_w) * 0.5;
+            let by = f32::from(pb.origin.y);
+            let options = WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(gpui_kit::bounds(
+                    point(px(bx), px(by)),
+                    size(px(bar_w), px(bar_h)),
+                ))),
+                titlebar: Some(TitlebarOptions {
+                    title: Some("OverLyrics Wallpaper Control".into()),
+                    appears_transparent: true,
+                    traffic_light_position: None,
+                }),
+                window_background: WindowBackgroundAppearance::Transparent,
+                is_resizable: false,
+                is_minimizable: false,
+                focus: false,
+                display_id: Some(primary.id()),
+                ..Default::default()
+            };
+            let bridge = self.wallpaper_bridge.clone();
+            if let Ok((bar, _)) = gpui_kit::open_window(options, cx, move |_, cx| {
+                cx.new(|_| super::wallpaper::control_bar::WallpaperControlBar::new(bridge))
+            }) {
+                if let Some(root) = bar.downcast::<gpui_kit::base::Root>() {
+                    let _ = root.update(cx, |r, _, cx| {
+                        r.style().background = Some(gpui_kit::transparent_black().into());
+                        cx.notify();
+                    });
+                }
+                self.wallpaper_control_bar = Some(bar);
+            }
+        }
+
+        if let Some(hwnd) = self.main_hwnd {
+            cx.defer(move |_| {
+                super::win32_window::set_window_visible(hwnd, false);
+            });
+        }
+    }
+
+    pub(super) fn exit_wallpaper_mode(&mut self, cx: &mut App, restore_main: bool) {
+        if let Some(bar) = self.wallpaper_control_bar.take() {
+            let _ = bar.update(cx, |_, w, _| w.remove_window());
+        }
+        let wins = std::mem::take(&mut self.wallpaper_windows);
+        for w in wins {
+            let _ = w.update(cx, |_, win, _| win.remove_window());
+        }
+        self.wallpaper_taskbar_listener = None;
+        super::wallpaper::win32_workerw::detach_from_workerw_and_refresh(0);
+        if restore_main && self.desktop_child.is_none() {
+            if let Some(h) = self.main_hwnd {
+                super::win32_window::set_window_visible(h, true);
+                super::tray::focus_main_hwnd(h);
+            }
+        }
+    }
+
     pub(super) fn open_close_confirm_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(old) = self.close_dialog.take() {
             let _ = old.update(cx, |_, w, _| w.remove_window());
@@ -2580,7 +2852,18 @@ impl PlayerView {
                         accent_hex: self.display.accent_hex,
                         desktop_open: self.desktop_child.is_some(),
                         desktop_locked: cfg.locked,
+                        wallpaper_open: !self.wallpaper_windows.is_empty(),
                     });
+                }
+                super::tray::TrayAction::ToggleWallpaper => {
+                    if !self.wallpaper_windows.is_empty() {
+                        self.pending_wallpaper_exit = true;
+                    } else {
+                        self.pending_wallpaper_enter = true;
+                    }
+                    if let Some(h) = self.main_hwnd {
+                        super::tray::focus_main_hwnd(h);
+                    }
                 }
                 super::tray::TrayAction::OpenSettings => {
                     let main_visible = self.desktop_child.is_none()
@@ -2751,6 +3034,7 @@ impl PlayerView {
             accent_hex: self.display.accent_hex,
             desktop_open,
             desktop_locked: dcfg.locked,
+            wallpaper_open: !self.wallpaper_windows.is_empty(),
         });
         let (pw, ph) = super::tray::TrayMenuPopover::window_size(desktop_open);
         let lx = screen_x as f32 / scale_factor.max(0.5);

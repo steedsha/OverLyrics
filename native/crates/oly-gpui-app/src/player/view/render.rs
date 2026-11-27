@@ -52,6 +52,7 @@ impl Render for PlayerView {
         if self.pending_quit {
             self.pending_quit = false;
             self.settings.finish_edit(self.now_ms(), true);
+            self.exit_wallpaper_mode(cx, false);
             if let Some(child) = self.settings_child.take() {
                 let _ = child.update(cx, |_, w, _| w.remove_window());
             }
@@ -72,6 +73,20 @@ impl Render for PlayerView {
             if self.main_hwnd.is_none() {
                 self.main_hwnd = crate::player::win32_window::hwnd_from_window(window);
             }
+            if self.pending_wallpaper_exit {
+                self.pending_wallpaper_exit = false;
+                self.exit_wallpaper_mode(cx, true);
+            }
+            if self.pending_wallpaper_enter {
+                self.pending_wallpaper_enter = false;
+                let this = cx.entity().downgrade();
+                window.defer(cx, move |w, cx| {
+                    let _ = this.update(cx, |pv, cx| {
+                        pv.enter_wallpaper_mode(w, cx);
+                    });
+                });
+            }
+            self.tick_wallpaper(cx);
             if self.pending_close_dialog {
                 self.pending_close_dialog = false;
                 let this = cx.entity().downgrade();
