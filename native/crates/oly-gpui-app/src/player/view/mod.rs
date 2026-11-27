@@ -62,6 +62,7 @@ pub struct PlayerView {
     settings_child_view:Option<WeakEntity<PlayerView>>,
     desktop_child: Option<AnyWindowHandle>,
     desktop_bridge: Arc<super::desktop_lyrics::SharedDesktopBridge>,
+    desktop_rows_cache: Arc<Vec<Row>>,
     desktop_candidates_cache: Arc<Vec<PickerEntry>>,
     desktop_candidates_next_ms: f64,
     pending_desktop_lyrics: bool,
@@ -81,6 +82,8 @@ pub struct PlayerView {
     pending_wallpaper_exit: bool,
     wallpaper_cover_arc: Option<Arc<Cover>>,
     wallpaper_cover_sig: u64,
+    last_wallpaper_display: String,
+    last_local_scan_version: u64,
     pending_settings_window:Option<usize>,
     pending_settings_after_mode: bool,
     sync_settings_child_config: bool,
@@ -320,7 +323,7 @@ impl PlayerView {
         } else {
             None
         };
-        let mut this = Self {settings_host:None,settings_child:None,settings_child_view:None,desktop_child:None,desktop_bridge:super::desktop_lyrics::SharedDesktopBridge::new(),desktop_candidates_cache:Arc::new(Vec::new()),desktop_candidates_next_ms:0.0,pending_desktop_lyrics:false,main_hwnd:None,tray,tray_menu:None,tray_bridge:tray_bridge.clone(),close_dialog:None,close_dialog_bridge:super::close_dialog::SharedCloseDialogBridge::new(),pending_close_dialog:false,pending_minimize_to_tray:false,wallpaper_windows:Vec::new(),wallpaper_control_bar:None,wallpaper_bridge:super::wallpaper::SharedWallpaperBridge::new(),wallpaper_taskbar_listener:None,pending_wallpaper_enter:false,pending_wallpaper_exit:false,wallpaper_cover_arc:None,wallpaper_cover_sig:0,pending_settings_window:None,pending_settings_after_mode:false,sync_settings_child_config:false,pending_import_rx:None,pending_folder_rx:None,native_background:None,doc_auto_picked:false,auto_pick_persisted:false,qa_frame_sample:None,smart_translation_worker:None,translation_signature:None,translated_rows:Vec::new(),search_config:None,priority_config:None,pressed_candidate:None,
+        let mut this = Self {settings_host:None,settings_child:None,settings_child_view:None,desktop_child:None,desktop_bridge:super::desktop_lyrics::SharedDesktopBridge::new(),desktop_rows_cache:Arc::new(Vec::new()),desktop_candidates_cache:Arc::new(Vec::new()),desktop_candidates_next_ms:0.0,pending_desktop_lyrics:false,main_hwnd:None,tray,tray_menu:None,tray_bridge:tray_bridge.clone(),close_dialog:None,close_dialog_bridge:super::close_dialog::SharedCloseDialogBridge::new(),pending_close_dialog:false,pending_minimize_to_tray:false,wallpaper_windows:Vec::new(),wallpaper_control_bar:None,wallpaper_bridge:super::wallpaper::SharedWallpaperBridge::new(),wallpaper_taskbar_listener:None,pending_wallpaper_enter:false,pending_wallpaper_exit:false,wallpaper_cover_arc:None,wallpaper_cover_sig:0,last_wallpaper_display:String::new(),last_local_scan_version:0,pending_settings_window:None,pending_settings_after_mode:false,sync_settings_child_config:false,pending_import_rx:None,pending_folder_rx:None,native_background:None,doc_auto_picked:false,auto_pick_persisted:false,qa_frame_sample:None,smart_translation_worker:None,translation_signature:None,translated_rows:Vec::new(),search_config:None,priority_config:None,pressed_candidate:None,
             cfg,
             focus: cx.focus_handle(),
             scene: None,
@@ -597,6 +600,7 @@ impl PlayerView {
         self.translation_signature=None;self.translated_rows.clear();
         self.lines = super::playback::prepare_lines(&doc);
         self.rows = model::rows_from(&self.lines);
+        self.desktop_rows_cache = Arc::new(self.rows.clone());
         for row in &mut self.rows {
             row.word_timed = doc.lines.get(row.group).is_some_and(|line| {
                 let words = if row.is_bg && !line.bg_words.is_empty() { &line.bg_words } else { &line.words };
@@ -825,7 +829,7 @@ impl PlayerView {
         if reset {
             self.picker_refresh_active = false;
             self.picker_locked_rows = None;
-            self.doc = None; self.doc_provider.clear();self.doc_identity=None; self.doc_auto_picked=false; self.auto_pick_persisted=false; self.lines.clear(); self.rows.clear();
+            self.doc = None; self.doc_provider.clear();self.doc_identity=None; self.doc_auto_picked=false; self.auto_pick_persisted=false; self.lines.clear(); self.rows.clear(); self.desktop_rows_cache = Arc::new(Vec::new());
             self.lyrics_auto_hidden = idle_reset;
             self.lyrics_user_force_shown = false;
             self.bottom_text.clear(); self.focus_controller.reset();
@@ -946,11 +950,50 @@ impl PlayerView {
                     if !unchanged{self.install_document(doc, false);}
                 } else if (no_candidates
                     || answer.error == "未找到匹配歌词"
+                    || answer.error == "离线模式"
                     || answer.error == "当前无网络或未找到匹配歌词"
                     || !any_lyric_source_enabled(&self.settings.config))
                     && self.doc.is_none()
                 {
                     self.lyrics_auto_hidden = true;
+                }
+            }
+        }
+        // When background local folder scan completes, immediately try matching the current track.
+        let scan_ver = self
+            .live
+            .as_ref()
+            .map(|l| l.local_folder.scan_version())
+            .unwrap_or(0);
+        if scan_ver != self.last_local_scan_version {
+            self.last_local_scan_version = scan_ver;
+            let custom_enabled = self
+                .settings
+                .config
+                .pointer("/lyrics/enabledSources/custom")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            if custom_enabled && self.doc.is_none() {
+                let threshold = self
+                    .settings
+                    .config
+                    .pointer("/lyrics/matchThreshold")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(70.0);
+                let matched = self.live.as_ref().and_then(|live| {
+                    let track = live.track.as_ref()?;
+                    live.local_folder
+                        .matches_for(track, threshold)
+                        .into_iter()
+                        .next()
+                });
+                if let Some(m) = matched {
+                    self.doc_auto_picked = false;
+                    self.auto_pick_persisted = false;
+                    self.doc_identity = Some(("custom".into(), m.id));
+                    self.doc_provider = "custom".into();
+                    self.lyrics_auto_hidden = m.doc.instrumental;
+                    self.install_document(m.doc, false);
                 }
             }
         }
@@ -2655,19 +2698,13 @@ impl PlayerView {
         );
         self.sync_wallpaper_snapshot();
 
-        let sf = window.scale_factor().max(1.0);
         for d in &targets {
             let b = d.bounds();
             let lx = f32::from(b.origin.x);
             let ly = f32::from(b.origin.y);
             let lw = f32::from(b.size.width).max(1.0);
             let lh = f32::from(b.size.height).max(1.0);
-            let phys_rect = (
-                (lx * sf).round() as i32,
-                (ly * sf).round() as i32,
-                (lw * sf).round().max(1.0) as i32,
-                (lh * sf).round().max(1.0) as i32,
-            );
+            let logical_rect = (lx, ly, lw, lh);
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(gpui_kit::bounds(
                     point(px(lx), px(ly)),
@@ -2687,7 +2724,7 @@ impl PlayerView {
             };
             let bridge = self.wallpaper_bridge.clone();
             if let Ok((child, _)) = gpui_kit::open_window(options, cx, move |_, cx| {
-                cx.new(|_| super::wallpaper::bg_view::WallpaperBgView::new(bridge, phys_rect))
+                cx.new(|_| super::wallpaper::bg_view::WallpaperBgView::new(bridge, logical_rect))
             }) {
                 self.wallpaper_windows.push(child);
             }
@@ -2805,7 +2842,9 @@ impl PlayerView {
         for ev in self.tray_bridge.drain_events() {
             match ev {
                 super::tray::TrayEvent::ShowMain => {
-                    if let Some(h) = self.main_hwnd {
+                    if !self.wallpaper_windows.is_empty() {
+                        self.exit_wallpaper_mode(cx, true);
+                    } else if let Some(h) = self.main_hwnd {
                         super::tray::focus_main_hwnd(h);
                     }
                 }
@@ -2817,7 +2856,9 @@ impl PlayerView {
         for act in self.tray_bridge.drain_actions() {
             match act {
                 super::tray::TrayAction::ShowMain => {
-                    if let Some(h) = self.main_hwnd {
+                    if !self.wallpaper_windows.is_empty() {
+                        self.exit_wallpaper_mode(cx, true);
+                    } else if let Some(h) = self.main_hwnd {
                         super::tray::focus_main_hwnd(h);
                     }
                 }
@@ -3243,38 +3284,6 @@ impl PlayerView {
             Some((idx, r)) => (Some(idx), Some(r.clone())),
             None => (None, None),
         };
-        let max_lines = self.desktop_bridge.read_cfg().display_lines.clamp(1, 3) as usize;
-        let mut display_rows: Vec<(usize, Row)> = Vec::new();
-        if let Some(active_idx) = active_row_index {
-            if max_lines <= 1 {
-                if let Some(r) = self.rows.get(active_idx) {
-                    display_rows.push((active_idx, r.clone()));
-                }
-            } else {
-                // Multi-line mode supports harmony (`is_bg`) rows alongside lead vocals.
-                for idx in active_idx..self.rows.len() {
-                    let r = &self.rows[idx];
-                    if r.text.trim().is_empty() {
-                        continue;
-                    }
-                    display_rows.push((idx, r.clone()));
-                    if display_rows.len() >= max_lines {
-                        break;
-                    }
-                }
-                if display_rows.len() < max_lines {
-                    let mut back_idx = active_idx;
-                    while display_rows.len() < max_lines && back_idx > 0 {
-                        back_idx -= 1;
-                        let r = &self.rows[back_idx];
-                        if r.text.trim().is_empty() {
-                            continue;
-                        }
-                        display_rows.insert(0, (back_idx, r.clone()));
-                    }
-                }
-            }
-        }
         let (track_title, track_artist) = self
             .live
             .as_ref()
@@ -3324,7 +3333,7 @@ impl PlayerView {
                 position_ms: pos,
                 active_row,
                 active_row_index,
-                display_rows,
+                rows: Arc::clone(&self.desktop_rows_cache),
                 interlude_range,
                 sync_offset_ms: self.sync.offset_ms(),
                 volume_pct,

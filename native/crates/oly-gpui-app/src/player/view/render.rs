@@ -318,6 +318,21 @@ impl Render for PlayerView {
                 .live
                 .as_ref()
                 .is_some_and(|l| l.custom_lyrics.has_any() || l.local_folder.has_any());
+            self.settings.display_count = cx.displays().len().max(1);
+            let cur_wp_disp = self
+                .settings
+                .value("window.wallpaperDisplay")
+                .as_str()
+                .unwrap_or("primary")
+                .to_string();
+            if !self.last_wallpaper_display.is_empty()
+                && cur_wp_disp != self.last_wallpaper_display
+                && !self.wallpaper_windows.is_empty()
+            {
+                self.exit_wallpaper_mode(cx, false);
+                self.pending_wallpaper_enter = true;
+            }
+            self.last_wallpaper_display = cur_wp_disp;
         }
         self.settings.tick(now);
         if let Some(host)=self.settings_host.as_mut(){
@@ -1030,8 +1045,11 @@ impl Render for PlayerView {
         let mut mode_swell = 0.0;
         let mut mode_content_alpha = 1.0_f32;
         let show_media = self.has_multiple_media_sessions();
+        let show_wallpaper = self.settings_host.is_none()
+            && (render_mode == Mode::Window || render_fullscreen);
+        let more_row_count = 5 + usize::from(show_wallpaper) + usize::from(show_media);
         if self.panel_motion[0].visible() {
-            let size = input::more_size_with_media(m.win_h, show_media);
+            let size = input::more_size_for_rows(m.win_h, more_row_count);
             let (mut rect, side) = self.panel_rect(chrome.more, size, viewport);
             let aim=self.cursor.map(|(x,y)|((x as f64-rect.left)/rect.width,(y as f64-rect.top)/rect.height));
             let (lx,ly,energy)=match aim {Some((x,y)) if (-0.15..=1.15).contains(&x)&&(-0.15..=1.15).contains(&y)=>(x,y,1.0),_=>(0.25,0.05,0.35)};
@@ -1112,7 +1130,7 @@ impl Render for PlayerView {
                 }
                 if more_open {
                     let r=Box4::new(rect.left as f32,rect.top as f32,rect.width as f32,rect.height as f32);
-                    let row_count = if show_media { 6 } else { 5 };
+                    let row_count = more_row_count;
                     for i in 0..4 {hot.push((Hot::MenuMode(i),input::mode_rect(r,i)));}
                     for i in 1..row_count {hot.push((Hot::MoreRow(i as u8),input::row_rect_count(r,i as u8,row_count)));}
                     if self.sync.enabled(){hot.push((Hot::SyncMinus,input::sync_rect_count(r,false,row_count)));hot.push((Hot::SyncPlus,input::sync_rect_count(r,true,row_count)));}
@@ -1241,6 +1259,9 @@ impl Render for PlayerView {
                         if self.picker_kind == PickerKind::Lyrics {
                             hot.push((Hot::PickerImport, picker_import_rect(rect)));
                             hot.push((Hot::PickerRefresh, picker_refresh_rect(rect)));
+                            if list.is_empty() {
+                                hot.push((Hot::PickerPickFolder, picker_offline_folder_btn_rect(rect)));
+                            }
                         }
                         let list_top = rect.top as f32 + VERSION_HEADER;
                         let list_bot = list_top + self.picker_capacity as f32 * VERSION_ROW;
@@ -2072,6 +2093,7 @@ impl Render for PlayerView {
             picker_scroll_px: self.picker_scroll_spring.position().max(0.0) as f32,
             picker_kind: self.picker_kind,
             show_media_row: show_media,
+            show_wallpaper_row: show_wallpaper,
             picker_refresh_angle: self.picker_refresh_angle,
             mode: render_mode,
             fullscreen: render_fullscreen,
@@ -2355,7 +2377,16 @@ impl Render for PlayerView {
                 }),
             )
             .on_drop::<gpui_kit::ExternalPaths>(cx.listener(|this, paths: &gpui_kit::ExternalPaths, _window, cx| {
-                if let Some(path) = paths
+                if let Some(dir) = paths.0.iter().find(|p| p.is_dir()) {
+                    let dir_str = dir.to_string_lossy().to_string();
+                    this.change_setting("lyrics.customLyricsDir", serde_json::json!(dir_str));
+                    if let Some(live) = this.live.as_mut() {
+                        live.local_folder.set_dir(Some(dir.clone()));
+                        live.status = "已添加本地歌词目录，正在后台扫描匹配…".into();
+                    }
+                    this.settings.status = "已设置本地歌词扫描目录，正在后台建立索引…".into();
+                    cx.notify();
+                } else if let Some(path) = paths
                     .0
                     .iter()
                     .find(|p| oly_engine::custom_lyrics::is_supported_lyric_file(p))

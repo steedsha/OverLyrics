@@ -128,10 +128,8 @@ pub struct DesktopLyricsView {
     toast: Option<(String, f64)>,
     last_row_idx: Option<usize>,
     last_track_sig: String,
-    multi_scroll_spring: Spring,
-    prev_multi_rows: Vec<(usize, Row)>,
-    outgoing_multi_row: Option<(usize, Row)>,
-    outgoing_step_h: f32,
+    amll_row_springs: HashMap<usize, crate::player::model::RowMotion>,
+    amll_bg_alpha: HashMap<usize, f32>,
     line_fade_start_ms: f64,
     last_origin: Option<(f32, f32)>,
     last_size: Option<(f32, f32)>,
@@ -195,14 +193,8 @@ impl DesktopLyricsView {
             toast: None,
             last_row_idx: None,
             last_track_sig: String::new(),
-            multi_scroll_spring: {
-                let mut s = Spring::new(0.0);
-                s.update_params(SpringParams::new(260.0, 28.0));
-                s
-            },
-            prev_multi_rows: Vec::new(),
-            outgoing_multi_row: None,
-            outgoing_step_h: 0.0,
+            amll_row_springs: HashMap::new(),
+            amll_bg_alpha: HashMap::new(),
             line_fade_start_ms: 0.0,
             last_origin: None,
             last_size: None,
@@ -1728,12 +1720,10 @@ impl Render for DesktopLyricsView {
         if track_sig != self.last_track_sig {
             self.last_track_sig = track_sig;
         }
+        let mut amll_snap_instant = track_changed;
         if track_changed {
-            self.multi_scroll_spring.set_position(0.0);
-            self.multi_scroll_spring.set_target_position(0.0);
-            self.outgoing_multi_row = None;
-            self.outgoing_step_h = 0.0;
-            self.prev_multi_rows.clear();
+            self.amll_row_springs.clear();
+            self.amll_bg_alpha.clear();
         }
         if snap.active_row_index != self.last_row_idx {
             let prev_idx = self.last_row_idx;
@@ -1744,47 +1734,13 @@ impl Render for DesktopLyricsView {
             self.vert_trans_scroll = 0.0;
             self.horiz_main_scroll = 0.0;
             self.horiz_trans_scroll = 0.0;
-
-            let normal_advance = !track_changed
-                && self.cfg.orientation == DesktopOrientation::Horizontal
-                && self.cfg.display_lines > 1
-                && match (prev_idx, snap.active_row_index) {
-                    (Some(p), Some(n)) => n > p && n - p <= 2,
-                    _ => false,
-                };
-            if normal_advance {
-                if let Some((out_idx, out_row)) = self.prev_multi_rows.first().cloned() {
-                    let still_present = snap.display_rows.iter().any(|(i, _)| *i == out_idx);
-                    if !still_present {
-                        let base_h = self.cfg.font_size * 0.95;
-                        let trans_h = if self.cfg.show_translation && !out_row.translation.trim().is_empty() {
-                            base_h * 0.65
-                        } else {
-                            0.0
-                        };
-                        let step_h = (base_h + trans_h + 6.0).clamp(24.0, 96.0);
-                        self.outgoing_multi_row = Some((out_idx, out_row));
-                        self.outgoing_step_h = step_h;
-                        self.multi_scroll_spring.set_position(step_h as f64);
-                        self.multi_scroll_spring.set_target_position(0.0);
-                    }
-                }
-            } else {
-                self.multi_scroll_spring.set_position(0.0);
-                self.multi_scroll_spring.set_target_position(0.0);
-                self.outgoing_multi_row = None;
-                self.outgoing_step_h = 0.0;
+            let large_jump = match (prev_idx, snap.active_row_index) {
+                (Some(p), Some(n)) => n < p || n.saturating_sub(p) > 3,
+                _ => true,
+            };
+            if large_jump {
+                amll_snap_instant = true;
             }
-        }
-        self.multi_scroll_spring.update(dt / 1000.0);
-        let multi_offset_y = self.multi_scroll_spring.position() as f32;
-        if self.outgoing_multi_row.is_some() && multi_offset_y.abs() < 0.4 {
-            self.outgoing_multi_row = None;
-            self.outgoing_step_h = 0.0;
-            self.multi_scroll_spring.set_position(0.0);
-        }
-        if !snap.display_rows.is_empty() {
-            self.prev_multi_rows = snap.display_rows.clone();
         }
         let line_fade = ((now - self.line_fade_start_ms) / 180.0).clamp(0.0, 1.0) as f32;
 
@@ -2018,63 +1974,139 @@ impl Render for DesktopLyricsView {
         let shaped_active = snap.active_row.as_ref().and_then(|row| {
             self.shape_single_line(row, &snap.display, font_size, horiz_avail_w, auto_scroll)
         });
-        let shaped_multi: Vec<(usize, Row, Arc<RowLines>)> = if orient == DesktopOrientation::Horizontal
+        // Reuse main window's AMLL multi-line layout: full row list with harmony (`is_bg`),
+        // duet left/right alignment (`r.duet`), per-line staggered `Spring` matching `springFeel`,
+        // and safe vertical padding so the hover control bar never overlaps lyrics.
+        let amll_has_duet = snap.rows.iter().any(|r| r.is_duet);
+        let safe_top = if orient == DesktopOrientation::Horizontal && hover_alpha > 0.02 && bar_side_t < 0.5 {
+            40.0 * hover_alpha + 8.0 * (1.0 - hover_alpha)
+        } else {
+            8.0
+        };
+        let safe_bot = if orient == DesktopOrientation::Horizontal && hover_alpha > 0.02 && bar_side_t >= 0.5 {
+            40.0 * hover_alpha + 8.0 * (1.0 - hover_alpha)
+        } else {
+            8.0
+        };
+        let amll_area_top = safe_top;
+        let amll_area_h = (win_h - safe_top - safe_bot).max(52.0);
+        struct AmllMultiRow {
+            idx: usize,
+            row: Row,
+            shaped: Arc<RowLines>,
+            y: f32,
+            bg_alpha: f32,
+        }
+        let amll_multi: Vec<AmllMultiRow> = if orient == DesktopOrientation::Horizontal
             && display_lines > 1
-            && snap.display_rows.len() > 1
+            && !snap.rows.is_empty()
         {
-            let count = snap.display_rows.len().min(display_lines as usize);
-            let bilingual_slots: f32 = snap
-                .display_rows
-                .iter()
-                .take(count)
-                .map(|(_, r)| {
-                    if show_trans && !r.translation.trim().is_empty() {
-                        1.72
+            let anchor_idx = snap.active_row_index.unwrap_or(0).min(snap.rows.len().saturating_sub(1));
+            let win_start = anchor_idx.saturating_sub(3);
+            let win_end = (anchor_idx + display_lines as usize + 3).min(snap.rows.len());
+            let slot_budget = display_lines as f32 * if show_trans { 1.65 } else { 1.08 };
+            let avail_per_slot = (amll_area_h / slot_budget.max(1.0)).max(18.0);
+            let fit_scale = (avail_per_slot / (font_size * 1.25)).clamp(0.42, 1.0);
+            let bg_scale = snap.display.bg_scale.clamp(0.55, 0.90);
+            let gap = 5.0_f32;
+            let spring_params = match snap.display.spring_feel {
+                crate::player::model::SpringFeel::Lively => SpringParams::new(260.0, 26.0),
+                crate::player::model::SpringFeel::Soft => SpringParams::new(125.0, 22.0),
+                crate::player::model::SpringFeel::Standard => SpringParams::new(180.0, 24.0),
+            };
+
+            let mut shaped_window: Vec<(usize, Row, Arc<RowLines>, f32, f32)> = Vec::new();
+            for idx in win_start..win_end {
+                let r = &snap.rows[idx];
+                if r.text.trim().is_empty() {
+                    continue;
+                }
+                let is_active = Some(idx) == snap.active_row_index;
+                let bg_active = r.is_bg
+                    && snap.position_ms >= r.start_ms - 400.0
+                    && snap.position_ms <= r.end_ms + 450.0;
+                let bg_target = if !r.is_bg || bg_active { 1.0_f32 } else { 0.0_f32 };
+                let bg_alpha = {
+                    let bg_a = self.amll_bg_alpha.entry(idx).or_insert(bg_target);
+                    let step = (dt as f32 / 180.0).clamp(0.0, 1.0);
+                    *bg_a += (bg_target - *bg_a) * step;
+                    *bg_a
+                };
+                if r.is_bg && bg_alpha < 0.02 {
+                    continue;
+                }
+                let role_scale = if r.is_bg {
+                    bg_scale
+                } else if is_active {
+                    1.0
+                } else {
+                    0.88
+                };
+                let row_fs = (font_size * fit_scale * role_scale).clamp(13.0, MAX_FONT);
+                let row_auto_scroll = auto_scroll && is_active && !r.is_bg;
+                if let Some(s) = self.shape_single_line(r, &snap.display, row_fs, horiz_avail_w, row_auto_scroll) {
+                    let row_tfs = (s.font_size * 0.58).clamp(10.5, 26.0);
+                    let th = if show_trans && !r.translation.trim().is_empty() {
+                        2.0 + row_tfs * 1.18
                     } else {
-                        1.08
-                    }
-                })
-                .sum();
-            let avail_per_slot = ((win_h - 20.0) / bilingual_slots.max(1.0)).max(18.0);
-            let fit_scale = (avail_per_slot / (font_size * 1.25)).clamp(0.38, 1.0);
-            let mut shaped_list: Vec<(usize, Row, Arc<RowLines>)> = snap
-                .display_rows
-                .iter()
-                .take(count)
-                .filter_map(|(idx, r)| {
-                    let is_active = Some(*idx) == snap.active_row_index;
-                    let role_scale = if r.is_bg {
-                        0.76
-                    } else if is_active {
-                        1.0
-                    } else {
-                        0.86
+                        0.0
                     };
-                    let row_fs = (font_size * fit_scale * role_scale).clamp(13.0, MAX_FONT);
-                    let row_auto_scroll = auto_scroll && is_active && !r.is_bg;
-                    self.shape_single_line(r, &snap.display, row_fs, horiz_avail_w, row_auto_scroll)
-                        .map(|s| (*idx, r.clone(), s))
-                })
-                .collect();
-            let _ = &mut shaped_list;
-            shaped_list
+                    let total_row_h = (s.line_height + th + gap) * if r.is_bg { bg_alpha } else { 1.0 };
+                    shaped_window.push((idx, r.clone(), s, total_row_h, bg_alpha));
+                }
+            }
+
+            let anchor_pos_in_win = shaped_window
+                .iter()
+                .position(|(i, _, _, _, _)| *i == anchor_idx)
+                .unwrap_or(0);
+            let anchor_y = if display_lines >= 3 {
+                amll_area_top + amll_area_h * 0.14
+            } else {
+                amll_area_top + amll_area_h * 0.18
+            };
+            let mut target_ys = vec![0.0_f32; shaped_window.len()];
+            if !shaped_window.is_empty() {
+                target_ys[anchor_pos_in_win] = anchor_y;
+                let mut y_down = anchor_y + shaped_window[anchor_pos_in_win].3;
+                for k in (anchor_pos_in_win + 1)..shaped_window.len() {
+                    target_ys[k] = y_down;
+                    y_down += shaped_window[k].3;
+                }
+                let mut y_up = anchor_y;
+                for k in (0..anchor_pos_in_win).rev() {
+                    y_up -= shaped_window[k].3;
+                    target_ys[k] = y_up;
+                }
+            }
+
+            let mut out = Vec::with_capacity(shaped_window.len());
+            for (k, (idx, row, shaped, _, bg_alpha)) in shaped_window.into_iter().enumerate() {
+                let ty = target_ys[k] as f64;
+                let dist = idx.abs_diff(anchor_idx);
+                let sp = self
+                    .amll_row_springs
+                    .entry(idx)
+                    .or_insert_with(|| crate::player::model::RowMotion::new(ty));
+                let direct = amll_snap_instant || !snap.display.enable_spring;
+                let delay_s = (dist.min(4) as f64) * 0.032;
+                let cur_y = sp.step(ty, direct, delay_s, dt, spring_params) as f32;
+                out.push(AmllMultiRow {
+                    idx,
+                    row,
+                    shaped,
+                    y: cur_y,
+                    bg_alpha,
+                });
+            }
+            self.amll_row_springs
+                .retain(|&i, _| i >= win_start.saturating_sub(2) && i <= win_end + 2);
+            self.amll_bg_alpha
+                .retain(|&i, _| i >= win_start.saturating_sub(2) && i <= win_end + 2);
+            out
         } else {
             Vec::new()
         };
-        let shaped_outgoing: Option<(Row, Arc<RowLines>)> = if !shaped_multi.is_empty() {
-            self.outgoing_multi_row.clone().and_then(|(_, r)| {
-                let row_fs = shaped_multi
-                    .first()
-                    .map(|(_, _, s)| s.font_size)
-                    .unwrap_or(font_size * 0.8)
-                    .clamp(13.0, MAX_FONT);
-                self.shape_single_line(&r, &snap.display, row_fs, horiz_avail_w, false)
-                    .map(|s| (r, s))
-            })
-        } else {
-            None
-        };
-        let outgoing_step_h = self.outgoing_step_h;
 
         // Smooth progress-driven scrolling (or fit-by-font-size when auto_scroll is off) for both orientations.
         let mut vert_main_scroll = self.vert_main_scroll;
@@ -2086,11 +2118,11 @@ impl Render for DesktopLyricsView {
         let scroll_alpha = (1.0 - (-dt / 180.0).exp()) as f32;
 
         if orient == DesktopOrientation::Horizontal {
-            let active_horiz = if !shaped_multi.is_empty() {
-                shaped_multi
+            let active_horiz = if !amll_multi.is_empty() {
+                amll_multi
                     .iter()
-                    .find(|(idx, r, _)| Some(*idx) == snap.active_row_index && !r.is_bg)
-                    .map(|(_, r, s)| (r, s))
+                    .find(|m| Some(m.idx) == snap.active_row_index && !m.row.is_bg)
+                    .map(|m| (&m.row, &m.shaped))
             } else {
                 snap.active_row.as_ref().zip(shaped_active.as_ref())
             };
@@ -2113,7 +2145,7 @@ impl Render for DesktopLyricsView {
                     horiz_main_scroll = self.horiz_main_scroll;
 
                     if show_trans && !row.translation.trim().is_empty() {
-                        let trans_fs = if !shaped_multi.is_empty() {
+                        let trans_fs = if !amll_multi.is_empty() {
                             (shaped.font_size * 0.58).clamp(10.5, 26.0)
                         } else {
                             (shaped.font_size * 0.62).clamp(12.0, 40.0)
@@ -2546,112 +2578,51 @@ impl Render for DesktopLyricsView {
                         match (snap.active_row.as_ref(), shaped_active.as_ref()) {
                             (Some(row), Some(shaped)) => match orient {
                                 DesktopOrientation::Horizontal => {
-                                    if !shaped_multi.is_empty() {
-                                        let gap = 5.0_f32;
+                                    if !amll_multi.is_empty() {
                                         let pad_x = 24.0_f32;
-                                        let total_h: f32 = shaped_multi
-                                            .iter()
-                                            .enumerate()
-                                            .map(|(k, (_, r, s))| {
-                                                let row_tfs = (s.font_size * 0.58).clamp(10.5, 26.0);
-                                                let th = if show_trans && !r.translation.trim().is_empty() {
-                                                    2.0 + row_tfs * 1.18
-                                                } else {
-                                                    0.0
-                                                };
-                                                s.line_height + th + if k > 0 { gap } else { 0.0 }
-                                            })
-                                            .sum();
-                                        let base_top_y = horiz_area_top + (horiz_area_h - total_h) * 0.5;
-                                        let slide_t = if outgoing_step_h > 1.0 {
-                                            1.0 - (multi_offset_y / outgoing_step_h).clamp(0.0, 1.0)
-                                        } else {
-                                            1.0
-                                        };
+                                        let origin_x_box = (win_w - horiz_avail_w) * 0.5;
+                                        let area_bot = amll_area_top + amll_area_h;
                                         window.with_content_mask(
                                             Some(ContentMask {
                                                 bounds: gpui_kit::bounds(
-                                                    point(px(0.0), px(horiz_area_top - 4.0)),
-                                                    gpui_kit::size(px(win_w), px(horiz_area_h + 8.0)),
+                                                    point(px(0.0), px(amll_area_top)),
+                                                    gpui_kit::size(px(win_w), px(amll_area_h)),
                                                 ),
                                             }),
                                             |window| {
-                                                let origin_x_center = (win_w - horiz_avail_w) * 0.5;
-                                                // Outgoing top line slides up & fades out smoothly
-                                                if let Some((out_r, out_s)) = shaped_outgoing.as_ref() {
-                                                    let out_fade = (1.0 - slide_t).clamp(0.0, 1.0);
-                                                    if out_fade > 0.02 {
-                                                        let out_tfs = (out_s.font_size * 0.58).clamp(10.5, 26.0);
-                                                        let out_th = if show_trans && !out_r.translation.trim().is_empty() {
-                                                            2.0 + out_tfs * 1.18
-                                                        } else {
-                                                            0.0
-                                                        };
-                                                        let out_y = base_top_y + multi_offset_y - (out_s.line_height + out_th + gap);
-                                                        let out_dim = if out_r.is_bg { 0.42 } else { 0.52 } * out_fade;
-                                                        let out_light = RowLight {
-                                                            base: out_dim,
-                                                            dark: out_dim,
-                                                            bright: out_dim,
-                                                            mask: None,
-                                                            glow: None,
-                                                        };
-                                                        paint::paint_row_with_shadow(
-                                                            window,
-                                                            out_s,
-                                                            origin_x_center,
-                                                            out_y,
-                                                            out_s.line_height,
-                                                            out_s.font_size,
-                                                            &out_s.words,
-                                                            &out_light,
-                                                            snap.position_ms,
-                                                            1.0,
-                                                            WrapperTransform::default(),
-                                                            -10000.0,
-                                                            10000.0,
-                                                            1.0,
-                                                            horiz_avail_w,
-                                                            LineAlign::Center,
-                                                            0.0,
-                                                            DESKTOP_DROP_SHADOW,
-                                                            Some(text_color),
-                                                        );
-                                                        if show_trans && !out_r.translation.trim().is_empty() {
-                                                            paint_horiz_translation(
-                                                                window,
-                                                                &out_r.translation,
-                                                                win_w,
-                                                                out_y + out_s.line_height + 2.0,
-                                                                out_tfs,
-                                                                text_color,
-                                                                (snap.display.trans_current.max(0.75) * out_dim).clamp(0.0, 1.0),
-                                                                false,
-                                                                0.0,
-                                                            );
-                                                        }
+                                                for item in &amll_multi {
+                                                    let r = &item.row;
+                                                    let s = &item.shaped;
+                                                    let cur_y = item.y;
+                                                    let row_tfs = (s.font_size * 0.58).clamp(10.5, 26.0);
+                                                    let th = if show_trans && !r.translation.trim().is_empty() {
+                                                        2.0 + row_tfs * 1.18
+                                                    } else {
+                                                        0.0
+                                                    };
+                                                    let row_bot = cur_y + s.line_height + th;
+                                                    if row_bot < amll_area_top - 4.0 || cur_y > area_bot + 4.0 {
+                                                        continue;
                                                     }
-                                                }
-                                                let mut cur_y = base_top_y + multi_offset_y;
-                                                let last_k = shaped_multi.len().saturating_sub(1);
-                                                for (k, (idx, r, s)) in shaped_multi.iter().enumerate() {
-                                                    let is_main_active = Some(*idx) == snap.active_row_index && !r.is_bg;
-                                                    let is_active = Some(*idx) == snap.active_row_index
+                                                    let edge_fade_top = ((cur_y - amll_area_top + 10.0) / 22.0).clamp(0.0, 1.0);
+                                                    let edge_fade_bot = ((area_bot - row_bot + 14.0) / 26.0).clamp(0.0, 1.0);
+                                                    let edge_fade = edge_fade_top.min(edge_fade_bot);
+                                                    let is_main_active = Some(item.idx) == snap.active_row_index && !r.is_bg;
+                                                    let is_active = Some(item.idx) == snap.active_row_index
                                                         || (r.is_bg
                                                             && snap.position_ms >= r.start_ms
                                                             && snap.position_ms <= r.end_ms + 300.0);
-                                                    let enter_fade = if shaped_outgoing.is_some() && k == last_k {
-                                                        slide_t.clamp(0.0, 1.0)
-                                                    } else {
-                                                        1.0
-                                                    };
                                                     let dim = (if is_active {
-                                                        if r.is_bg { 0.84 } else { 1.0 }
+                                                        if r.is_bg { 0.86 } else { 1.0 }
                                                     } else if r.is_bg {
-                                                        0.46
+                                                        0.44
                                                     } else {
-                                                        0.54
-                                                    }) * enter_fade;
+                                                        snap.display.bg_opacity.clamp(0.32, 0.62)
+                                                    }) * item.bg_alpha
+                                                        * edge_fade;
+                                                    if dim < 0.02 {
+                                                        continue;
+                                                    }
                                                     let light = row_light(r, snap.position_ms, is_active, false, &snap.display);
                                                     let progress = paint::line_progress(
                                                         snap.position_ms,
@@ -2689,10 +2660,15 @@ impl Render for DesktopLyricsView {
                                                         .map(|l| f32::from(l.layout.width))
                                                         .unwrap_or(0.0);
                                                     let row_overflow = is_main_active && auto_scroll && natural_w > horiz_avail_w;
+                                                    let base_align = if amll_has_duet {
+                                                        if r.is_duet { LineAlign::Right } else { LineAlign::Left }
+                                                    } else {
+                                                        LineAlign::Center
+                                                    };
                                                     let (rx, rw, ralign) = if row_overflow {
                                                         (pad_x - horiz_main_scroll, natural_w + 32.0, LineAlign::Left)
                                                     } else {
-                                                        (origin_x_center, horiz_avail_w, LineAlign::Center)
+                                                        (origin_x_box, horiz_avail_w, base_align)
                                                     };
                                                     let draw_row = |window: &mut Window| {
                                                         paint::paint_row_with_shadow(
@@ -2721,8 +2697,8 @@ impl Render for DesktopLyricsView {
                                                         window.with_content_mask(
                                                             Some(ContentMask {
                                                                 bounds: gpui_kit::bounds(
-                                                                    point(px(pad_x), px(horiz_area_top - 4.0)),
-                                                                    gpui_kit::size(px(horiz_avail_w), px(horiz_area_h + 8.0)),
+                                                                    point(px(pad_x), px(amll_area_top)),
+                                                                    gpui_kit::size(px(horiz_avail_w), px(amll_area_h)),
                                                                 ),
                                                             }),
                                                             draw_row,
@@ -2730,25 +2706,33 @@ impl Render for DesktopLyricsView {
                                                     } else {
                                                         draw_row(window);
                                                     }
-                                                    cur_y += s.line_height;
                                                     if show_trans && !r.translation.trim().is_empty() {
-                                                        let row_tfs = (s.font_size * 0.58).clamp(10.5, 26.0);
                                                         let trans_a = (snap.display.trans_current.max(0.75) * dim)
                                                             .clamp(0.0, 1.0);
-                                                        paint_horiz_translation(
-                                                            window,
-                                                            &r.translation,
-                                                            win_w,
-                                                            cur_y + 2.0,
-                                                            row_tfs,
-                                                            text_color,
-                                                            trans_a,
-                                                            is_main_active && auto_scroll,
-                                                            if is_main_active { horiz_trans_scroll } else { 0.0 },
-                                                        );
-                                                        cur_y += 2.0 + row_tfs * 1.18;
+                                                        if amll_has_duet && !row_overflow {
+                                                            let t_text = r.translation.trim();
+                                                            let (tw, _) = chrome::measure(window, t_text, row_tfs, 500.0);
+                                                            let tx = if r.is_duet {
+                                                                (origin_x_box + horiz_avail_w - tw).max(origin_x_box)
+                                                            } else {
+                                                                origin_x_box
+                                                            };
+                                                            let col = Hsla::from(gpui_kit::rgb(text_color)).opacity(trans_a);
+                                                            chrome::paint_text(window, t_text, tx, cur_y + s.line_height + 2.0, row_tfs, 500.0, col);
+                                                        } else {
+                                                            paint_horiz_translation(
+                                                                window,
+                                                                &r.translation,
+                                                                win_w,
+                                                                cur_y + s.line_height + 2.0,
+                                                                row_tfs,
+                                                                text_color,
+                                                                trans_a,
+                                                                is_main_active && auto_scroll,
+                                                                if is_main_active { horiz_trans_scroll } else { 0.0 },
+                                                            );
+                                                        }
                                                     }
-                                                    cur_y += gap;
                                                 }
                                             },
                                         );

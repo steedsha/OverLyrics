@@ -61,6 +61,7 @@ struct ScannerState {
 pub struct LocalFolderScanner {
     state: Arc<Mutex<ScannerState>>,
     generation: Arc<AtomicU64>,
+    scan_version: Arc<AtomicU64>,
 }
 
 impl Default for LocalFolderScanner {
@@ -74,11 +75,16 @@ impl LocalFolderScanner {
         let scanner = Self {
             state: Arc::new(Mutex::new(ScannerState::default())),
             generation: Arc::new(AtomicU64::new(0)),
+            scan_version: Arc::new(AtomicU64::new(0)),
         };
         if dir.is_some() {
             scanner.set_dir(dir);
         }
         scanner
+    }
+
+    pub fn scan_version(&self) -> u64 {
+        self.scan_version.load(Ordering::SeqCst)
     }
 
     pub fn set_dir(&self, dir: Option<PathBuf>) {
@@ -99,6 +105,7 @@ impl LocalFolderScanner {
         };
         let state = self.state.clone();
         let generation = self.generation.clone();
+        let scan_version = self.scan_version.clone();
         let _ = std::thread::Builder::new()
             .name("local-lyrics-scan".into())
             .spawn(move || {
@@ -116,6 +123,7 @@ impl LocalFolderScanner {
                 }
                 st.files = files;
                 st.by_id = by_id;
+                scan_version.fetch_add(1, Ordering::SeqCst);
             });
     }
 

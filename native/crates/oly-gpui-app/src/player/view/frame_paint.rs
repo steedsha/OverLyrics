@@ -919,26 +919,21 @@ pub(super) fn paint_frame(
                         panel.content_alpha,
                     );
                 }
-                let row_count = if plan.show_media_row { 6 } else { 5 };
-                for i in 0..row_count {
-                    let item = if plan.show_media_row {
-                        match i {
-                            0 => more_items[0],
-                            1 => more_items[1],
-                            2 => more_items[2],
-                            3 => input::MORE_DESKTOP_LABEL,
-                            4 => input::MORE_MEDIA_LABEL,
-                            _ => more_items[3],
-                        }
-                    } else {
-                        match i {
-                            0 => more_items[0],
-                            1 => more_items[1],
-                            2 => more_items[2],
-                            3 => input::MORE_DESKTOP_LABEL,
-                            _ => more_items[3],
-                        }
-                    };
+                let mut rows_spec: Vec<(&str, Icon)> = vec![
+                    (more_items[0], Icon::Sync),
+                    (more_items[1], Icon::List),
+                    (more_items[2], Icon::MotionCover),
+                    (input::MORE_DESKTOP_LABEL, Icon::DesktopLyrics),
+                ];
+                if plan.show_wallpaper_row {
+                    rows_spec.push((input::MORE_WALLPAPER_LABEL, Icon::Fullscreen));
+                }
+                if plan.show_media_row {
+                    rows_spec.push((input::MORE_MEDIA_LABEL, Icon::Play));
+                }
+                rows_spec.push((more_items[3], Icon::Settings));
+                let row_count = rows_spec.len();
+                for (i, (item, icon)) in rows_spec.into_iter().enumerate() {
                     let b = input::row_rect_count(r, i as u8, row_count);
                     let f = feedback(Hot::MoreRow(i as u8));
                     if i == 0 || i == row_count - 1 {
@@ -956,24 +951,6 @@ pub(super) fn paint_frame(
                         chrome::control_surface_alpha_radius(window, b, f, false, panel.content_alpha, 13.5);
                         chrome::chevron(window, b.right() - 16.0, b.y + (b.h - 8.0) * 0.5, text(0.36 + 0.30 * f.hover));
                     }
-                    let icon = if plan.show_media_row {
-                        match i {
-                            0 => Icon::Sync,
-                            1 => Icon::List,
-                            2 => Icon::MotionCover,
-                            3 => Icon::DesktopLyrics,
-                            4 => Icon::Play,
-                            _ => Icon::Settings,
-                        }
-                    } else {
-                        match i {
-                            0 => Icon::Sync,
-                            1 => Icon::List,
-                            2 => Icon::MotionCover,
-                            3 => Icon::DesktopLyrics,
-                            _ => Icon::Settings,
-                        }
-                    };
                     icons::paint(window,cx,icon,Box4::new(x+14.0,b.y+(b.h-16.0)*0.5,16.0,16.0),text(0.55 + 0.25 * f.hover));
                     chrome::paint_text_vcentred(window,item,x+38.0,b.centre().1,12.0,500.0,text(0.88 + 0.08 * f.hover));
                     if i == 0 {
@@ -1426,8 +1403,36 @@ pub(in crate::player) fn paint_lyrics_picker_contents(
         chrome::paint_text(window, "当前空间不足，请调大窗口或切换模式", x, top + VERSION_HEADER + 5.0, 11.0, 500.0, text(0.55));
     }
     if candidates.is_empty() {
-        let empty_msg = if track_title == "未在播放" { "未在播放" } else { "暂无匹配歌词" };
-        chrome::paint_text(window, empty_msg, x, top + VERSION_HEADER + 12.0, 12.0, 500.0, text(0.55));
+        if show_lyrics_actions && track_title != "未在播放" {
+            let row_y = top + VERSION_HEADER + 6.0;
+            let row_h = 34.0_f32;
+            chrome::paint_text_vcentred(
+                window,
+                "本地歌词扫描目录",
+                x,
+                row_y + row_h * 0.5,
+                12.5,
+                500.0,
+                text(0.82),
+            );
+            let btn = picker_offline_folder_btn_rect(panel_rect);
+            chrome::fill_round(window, btn.x, btn.y, btn.w, btn.h, btn.h * 0.5, text(0.09));
+            chrome::stroke_round(window, btn.x, btn.y, btn.w, btn.h, btn.h * 0.5, 0.9, text(0.22));
+            let lbl = "选择目录";
+            let (lw, _) = chrome::measure(window, lbl, 11.5, 550.0);
+            chrome::paint_text_vcentred(
+                window,
+                lbl,
+                btn.x + (btn.w - lw) * 0.5,
+                btn.centre().1,
+                11.5,
+                550.0,
+                text(0.90),
+            );
+        } else {
+            let empty_msg = if track_title == "未在播放" { "未在播放" } else { "暂无匹配歌词" };
+            chrome::paint_text(window, empty_msg, x, top + VERSION_HEADER + 12.0, 12.0, 500.0, text(0.55));
+        }
     }
 }
 

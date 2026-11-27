@@ -19,7 +19,7 @@ const OCCLUSION_POLL_INTERVAL_MS: f64 = 260.0;
 
 pub struct WallpaperBgView {
     bridge: Arc<SharedWallpaperBridge>,
-    target_rect_phys: (i32, i32, i32, i32),
+    target_bounds_logical: (f32, f32, f32, f32),
     hwnd: isize,
     attached_gen: u64,
     scene: Option<PlayerScene>,
@@ -36,11 +36,11 @@ pub struct WallpaperBgView {
 impl WallpaperBgView {
     pub fn new(
         bridge: Arc<SharedWallpaperBridge>,
-        target_rect_phys: (i32, i32, i32, i32),
+        target_bounds_logical: (f32, f32, f32, f32),
     ) -> Self {
         Self {
             bridge,
-            target_rect_phys,
+            target_bounds_logical,
             hwnd: 0,
             attached_gen: u64::MAX,
             scene: None,
@@ -58,6 +58,17 @@ impl WallpaperBgView {
     fn now_ms(&self) -> f64 {
         self.started.elapsed().as_secs_f64() * 1000.0
     }
+
+    fn target_rect_phys(&self, scale_factor: f32) -> (i32, i32, i32, i32) {
+        let sf = scale_factor.max(1.0);
+        let (lx, ly, lw, lh) = self.target_bounds_logical;
+        (
+            (lx * sf).round() as i32,
+            (ly * sf).round() as i32,
+            (lw * sf).round().max(1.0) as i32,
+            (lh * sf).round().max(1.0) as i32,
+        )
+    }
 }
 
 impl Drop for WallpaperBgView {
@@ -72,6 +83,8 @@ impl Drop for WallpaperBgView {
 impl Render for WallpaperBgView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let now = self.now_ms();
+        let sf = window.scale_factor().max(1.0);
+        let phys_rect = self.target_rect_phys(sf);
         let taskbar_gen = self.bridge.taskbar_recreated_gen.load(Ordering::SeqCst);
 
         if let Some(hwnd) = win32_window::hwnd_from_window(window) {
@@ -81,7 +94,7 @@ impl Render for WallpaperBgView {
             }
             if self.attached_gen != taskbar_gen {
                 self.attached_gen = taskbar_gen;
-                let (x, y, w, h) = self.target_rect_phys;
+                let (x, y, w, h) = phys_rect;
                 window.defer(cx, move |_, _| {
                     attach_to_workerw(hwnd, x, y, w, h);
                 });
@@ -106,7 +119,7 @@ impl Render for WallpaperBgView {
         if now - self.last_occlusion_check_ms >= OCCLUSION_POLL_INTERVAL_MS {
             self.last_occlusion_check_ms = now;
             let own = self.bridge.own_hwnds();
-            self.occluded = is_desktop_occluded_or_locked(self.target_rect_phys, &own);
+            self.occluded = is_desktop_occluded_or_locked(phys_rect, &own);
         }
 
         let pause_slept = self

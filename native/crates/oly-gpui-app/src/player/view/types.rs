@@ -212,6 +212,7 @@ pub(super) enum Hot {
     CoverSwitch(u8),
     PickerRefresh,
     PickerImport,
+    PickerPickFolder,
     AlbumEnter,
     AlbumReturn,
     SyncMinus,
@@ -233,7 +234,7 @@ pub(super) enum Hot {
 
 pub(super) fn pointer_hit(hot: &[(Hot,Box4)], panels: &[Box4], x: f32, y: f32) -> Option<Hot> {
     let covered=panels.iter().any(|r| r.contains(x,y));
-    hot.iter().rev().find(|(h,r)| r.contains(x,y) && (!covered || matches!(h,Hot::MoreRow(_) | Hot::Candidate(_) | Hot::SmartTranslation(_) | Hot::CoverSwitch(_) | Hot::PickerRefresh | Hot::PickerImport | Hot::VolumeTrack | Hot::SettingsClose | Hot::SettingsPage(_) | Hot::SettingSlider(_) | Hot::SettingChoice(_) | Hot::DropdownOption(_) | Hot::ModalCancel | Hot::ModalSave | Hot::SyncMinus | Hot::SyncPlus | Hot::MenuMode(_)))).map(|(h,_)| *h)
+    hot.iter().rev().find(|(h,r)| r.contains(x,y) && (!covered || matches!(h,Hot::MoreRow(_) | Hot::Candidate(_) | Hot::SmartTranslation(_) | Hot::CoverSwitch(_) | Hot::PickerRefresh | Hot::PickerImport | Hot::PickerPickFolder | Hot::VolumeTrack | Hot::SettingsClose | Hot::SettingsPage(_) | Hot::SettingSlider(_) | Hot::SettingChoice(_) | Hot::DropdownOption(_) | Hot::ModalCancel | Hot::ModalSave | Hot::SyncMinus | Hot::SyncPlus | Hot::MenuMode(_)))).map(|(h,_)| *h)
 }
 
 /// The fixed chrome geometry for one frame.
@@ -473,6 +474,7 @@ pub(super) struct Plan {
     pub(super) picker_scroll_px: f32,
     pub(super) picker_kind: PickerKind,
     pub(super) show_media_row: bool,
+    pub(super) show_wallpaper_row: bool,
     pub(super) picker_refresh_angle: f32,
     pub(super) control_pending: bool,
     pub(super) lyrics_visible: bool,
@@ -534,4 +536,13 @@ pub(super) fn window_caption_rects(win_w: f32, compact: bool) -> (Box4, [Box4; 4
         let close_b = Box4::new(win_w - 42.0, 14.0, 28.0, 28.0);
         (zone, [pin_b, min_b, fs_b, close_b])
     }
+}
+
+
+pub(in crate::player) fn picker_offline_folder_btn_rect(rect: GlassRect) -> Box4 {
+    let w = 74.0_f32;
+    let h = 26.0_f32;
+    let x = rect.left as f32 + rect.width as f32 - 14.0 - w;
+    let y = rect.top as f32 + VERSION_HEADER + 6.0 + (34.0 - h) * 0.5;
+    Box4::new(x, y, w, h)
 }

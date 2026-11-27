@@ -1079,13 +1079,38 @@ impl PlayerView {
                 self.picker_open = true;
             }
             Some(Hot::MoreRow(i)) => {
+                let show_wallpaper = self.settings_host.is_none()
+                    && (self.tool.mode() == Some(Mode::Window) || self.last_fullscreen);
                 let has_media = self.has_multiple_media_sessions();
-                let settings_idx = if has_media { 5 } else { 4 };
+                let mut cur = 4u8;
+                let wallpaper_idx = if show_wallpaper {
+                    let idx = cur;
+                    cur += 1;
+                    Some(idx)
+                } else {
+                    None
+                };
+                let media_idx = if has_media {
+                    let idx = cur;
+                    cur += 1;
+                    Some(idx)
+                } else {
+                    None
+                };
+                let settings_idx = cur;
                 if i == 3 && self.settings_host.is_none() {
                     self.pending_desktop_lyrics = true;
                     self.tool.set_more_open(false);
                     self.picker_open = false;
-                } else if has_media && i == 4 {
+                } else if Some(i) == wallpaper_idx {
+                    if !self.wallpaper_windows.is_empty() {
+                        self.pending_wallpaper_exit = true;
+                    } else {
+                        self.pending_wallpaper_enter = true;
+                    }
+                    self.tool.set_more_open(false);
+                    self.picker_open = false;
+                } else if Some(i) == media_idx {
                     self.picker_kind = PickerKind::Media;
                     self.picker_scroll_spring.set_position(0.0);
                     self.picker_scroll_spring.set_target_position(0.0);
@@ -1208,6 +1233,18 @@ impl PlayerView {
             }
             Some(Hot::PickerImport) => {
                 self.trigger_picker_import();
+            }
+            Some(Hot::PickerPickFolder) => {
+                if self.pending_folder_rx.is_none() {
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    self.pending_folder_rx = Some(rx);
+                    std::thread::Builder::new()
+                        .name("lyric-folder-dialog".into())
+                        .spawn(move || {
+                            let _ = tx.send(oly_platform_win::file_dialog::pick_lyrics_folder());
+                        })
+                        .ok();
+                }
             }
             Some(Hot::PickerRefresh) => {
                 if let Some((_, fb)) = self.feedback.iter_mut().find(|(h, _)| *h == Hot::PickerRefresh) {

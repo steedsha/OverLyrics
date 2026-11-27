@@ -950,7 +950,7 @@ impl SearchWorker {
                         (
                             None,
                             if !manual && rows.is_empty() && delivered_pick.is_none() {
-                                "当前无网络或未找到匹配歌词".into()
+                                "离线模式".into()
                             } else {
                                 "未找到匹配歌词".into()
                             },

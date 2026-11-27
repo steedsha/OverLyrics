@@ -84,6 +84,23 @@ unsafe fn find_workerw() -> Option<(windows::Win32::Foundation::HWND, Option<win
     // 2. Win11 24H2+: SHELLDLL_DefView is directly under Progman, and WorkerW is a child of Progman.
     if let Ok(child_w) = unsafe { FindWindowExW(Some(progman), None, w!("WorkerW"), None) } {
         if !child_w.0.is_null() {
+            // Ensure this WorkerW sits directly behind SHELLDLL_DefView if present.
+            if !st.defview.0.is_null() {
+                use windows::Win32::UI::WindowsAndMessaging::{
+                    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos,
+                };
+                let _ = unsafe {
+                    SetWindowPos(
+                        child_w,
+                        Some(st.defview),
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                    )
+                };
+            }
             return Some((child_w, None));
         }
     }
@@ -99,16 +116,18 @@ pub fn attach_to_workerw(hwnd: isize, x_phys: i32, y_phys: i32, w_phys: i32, h_p
     unsafe {
         use windows::Win32::Foundation::{HWND, RECT};
         use windows::Win32::UI::WindowsAndMessaging::{
-            GWL_EXSTYLE, GWL_STYLE, GetSystemMetrics, GetWindowLongW, GetWindowRect, HWND_BOTTOM,
-            SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_SHOWWINDOW,
-            SetParent, SetWindowLongW, SetWindowPos, WS_CAPTION, WS_CHILD, WS_EX_APPWINDOW,
-            WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP, WS_THICKFRAME, WS_VISIBLE,
+            GWL_EXSTYLE, GWL_STYLE, GetSystemMetrics, GetWindowLongW, GetWindowRect, HWND_TOP,
+            SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED,
+            SWP_NOACTIVATE, SWP_SHOWWINDOW, SetParent, SetWindowLongW, SetWindowPos, ShowWindow,
+            WS_CAPTION, WS_CHILD, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
+            WS_THICKFRAME, WS_VISIBLE,
         };
 
         if hwnd == 0 {
             return false;
         }
         let Some((parent, defview_above)) = find_workerw() else {
+            log::warn!("[wallpaper] find_workerw returned None");
             return false;
         };
         let h = HWND(hwnd as *mut core::ffi::c_void);
@@ -138,7 +157,9 @@ pub fn attach_to_workerw(hwnd: isize, x_phys: i32, y_phys: i32, w_phys: i32, h_p
         let rel_x = x_phys - origin_x;
         let rel_y = y_phys - origin_y;
 
-        let insert_after = defview_above.unwrap_or(HWND_BOTTOM);
+        // Place at HWND_TOP inside WorkerW so we sit ABOVE Wallpaper Engine's child window
+        // while remaining strictly BELOW SHELLDLL_DefView (desktop icons).
+        let insert_after = defview_above.unwrap_or(HWND_TOP);
         let _ = SetWindowPos(
             h,
             Some(insert_after),
@@ -147,6 +168,11 @@ pub fn attach_to_workerw(hwnd: isize, x_phys: i32, y_phys: i32, w_phys: i32, h_p
             w_phys.max(1),
             h_phys.max(1),
             SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW,
+        );
+        let _ = ShowWindow(h, SW_SHOWNOACTIVATE);
+        log::info!(
+            "[wallpaper] attached hwnd={hwnd:#x} parent={:#x} rel=({rel_x},{rel_y}) phys=({w_phys}x{h_phys})",
+            parent.0 as isize
         );
         true
     }
@@ -212,8 +238,8 @@ pub fn is_desktop_occluded_or_locked(
             CloseDesktop, DESKTOP_ACCESS_FLAGS, DESKTOP_CONTROL_FLAGS, OpenInputDesktop,
         };
         use windows::Win32::UI::WindowsAndMessaging::{
-            GetClassNameW, GetForegroundWindow, GetWindowRect, IsIconic, IsWindowVisible,
-            IsZoomed,
+            GetClassNameW, GetForegroundWindow, GetParent, GetWindowRect, IsIconic,
+            IsWindowVisible, IsZoomed,
         };
 
         // 1. Lockscreen / UAC / screensaver check: OpenInputDesktop fails when input desktop is secure.
@@ -249,8 +275,21 @@ pub fn is_desktop_occluded_or_locked(
                 | "Shell_SecondaryTrayWnd"
                 | "NotifyIconOverflowWindow"
                 | "Windows.UI.Core.CoreWindow"
-        ) {
+        ) || cls.starts_with("wp_")
+            || cls.contains("Wallpaper")
+        {
             return false;
+        }
+        // Ignore child windows hosted inside Progman/WorkerW (e.g. Wallpaper Engine).
+        if let Ok(parent) = GetParent(fg) {
+            if !parent.0.is_null() {
+                let mut pbuf = [0u16; 64];
+                let pn = GetClassNameW(parent, &mut pbuf) as usize;
+                let pcls = String::from_utf16_lossy(&pbuf[..pn]);
+                if matches!(pcls.as_str(), "Progman" | "WorkerW") {
+                    return false;
+                }
+            }
         }
         let mut r = RECT::default();
         if GetWindowRect(fg, &mut r).is_err() {

@@ -20,7 +20,6 @@ use super::icons::{self, Icon};
 use super::interaction::{Feedback, state_icon_spring};
 use super::model::{Box4, ThemeMode};
 use super::panel_motion::PanelMotion;
-use super::view::paint_sidecar_glass_frame;
 use super::win32_window;
 use oly_core::scroll::Spring;
 
@@ -529,8 +528,6 @@ impl Render for TrayMenuPopover {
         let fb_map = self.feedback.clone();
         let surf_a = self.motion.surface_alpha();
         let cont_a = self.motion.content_alpha();
-        let light_panel = snap.theme_mode == ThemeMode::Light;
-        let panel_radius = snap.corner_radius.clamp(12.0, 22.0);
         let accent_hex = snap.accent_hex;
 
         div()
@@ -590,9 +587,37 @@ impl Render for TrayMenuPopover {
                 canvas(
                     |_, _, _| (),
                     move |_, _, window, cx| {
-                        chrome::set_light_theme(light_panel);
-                        let text = |a: f32| chrome::text(a * cont_a);
-                        paint_sidecar_glass_frame(window, card, panel_radius, snap.theme_mode, surf_a);
+                        let dark_card = snap.theme_mode == ThemeMode::Dark;
+                        chrome::set_light_theme(!dark_card);
+                        let card_bg = if dark_card {
+                            hsla(0.0, 0.0, 0.125, 0.98 * surf_a)
+                        } else {
+                            hsla(0.0, 0.0, 0.985, 0.99 * surf_a)
+                        };
+                        let card_border = if dark_card {
+                            hsla(0.0, 0.0, 1.0, 0.13 * surf_a)
+                        } else {
+                            hsla(0.0, 0.0, 0.0, 0.11 * surf_a)
+                        };
+                        let menu_r = 12.0_f32;
+                        chrome::fill_round(window, card.x, card.y, card.w, card.h, menu_r, card_bg);
+                        chrome::stroke_round(window, card.x, card.y, card.w, card.h, menu_r, 1.0, card_border);
+
+                        let fg_main = if dark_card {
+                            hsla(0.0, 0.0, 0.96, 0.94 * cont_a)
+                        } else {
+                            hsla(0.0, 0.0, 0.10, 0.92 * cont_a)
+                        };
+                        let fg_icon = if dark_card {
+                            hsla(0.0, 0.0, 0.92, 0.78 * cont_a)
+                        } else {
+                            hsla(0.0, 0.0, 0.16, 0.78 * cont_a)
+                        };
+                        let div_col = if dark_card {
+                            hsla(0.0, 0.0, 1.0, 0.10 * cont_a)
+                        } else {
+                            hsla(0.0, 0.0, 0.0, 0.08 * cont_a)
+                        };
 
                         let paint_row = |window: &mut Window,
                                          cx: &mut App,
@@ -603,18 +628,28 @@ impl Render for TrayMenuPopover {
                                          checked: bool,
                                          danger: bool| {
                             let f = fb_map.get(&act).copied().unwrap_or_default();
-                            chrome::control_surface_alpha_radius(window, r, f, false, cont_a, 13.5);
-                            let icon_col = if danger {
-                                Hsla::from(rgb(0xFF453A)).opacity((0.78 + 0.20 * f.hover) * cont_a)
+                            if f.hover > 0.01 || f.press > 0.01 {
+                                let hover_bg = if danger {
+                                    Hsla::from(rgb(0xFF3B30)).opacity((0.12 * f.hover + 0.06 * f.press) * cont_a)
+                                } else if dark_card {
+                                    hsla(0.0, 0.0, 1.0, (0.09 * f.hover + 0.05 * f.press) * cont_a)
+                                } else {
+                                    hsla(0.0, 0.0, 0.0, (0.06 * f.hover + 0.04 * f.press) * cont_a)
+                                };
+                                chrome::fill_round(window, r.x, r.y, r.w, r.h, 8.0, hover_bg);
+                            }
+                            let red_hover = danger && f.hover > 0.05;
+                            let icon_col = if red_hover {
+                                Hsla::from(rgb(0xFF3B30)).opacity((0.90 + 0.08 * f.hover) * cont_a)
                             } else if checked {
-                                chrome::accent_rgb(accent_hex, 0.92 * cont_a)
+                                chrome::accent_rgb(accent_hex, 0.95 * cont_a)
                             } else {
-                                text(0.55 + 0.25 * f.hover)
+                                fg_icon
                             };
-                            let label_col = if danger {
-                                Hsla::from(rgb(0xFF453A)).opacity((0.88 + 0.10 * f.hover) * cont_a)
+                            let label_col = if red_hover {
+                                Hsla::from(rgb(0xFF3B30)).opacity((0.92 + 0.06 * f.hover) * cont_a)
                             } else {
-                                text(0.88 + 0.08 * f.hover)
+                                fg_main
                             };
                             icons::paint(
                                 window,
@@ -628,7 +663,7 @@ impl Render for TrayMenuPopover {
                                 label,
                                 card.x + 38.0,
                                 r.centre().1,
-                                12.0,
+                                12.5,
                                 500.0,
                                 label_col,
                             );
@@ -645,27 +680,34 @@ impl Render for TrayMenuPopover {
                             }
                         };
 
-                        paint_row(window, cx, TrayAction::ShowMain, r_show, Icon::CoverExpand, "显示主界面", false, false);
+                        paint_row(window, cx, TrayAction::ShowMain, r_show, Icon::CoverExpand, "显示界面", false, false);
                         paint_row(window, cx, TrayAction::ToggleDesktopLyrics, r_desk, Icon::DesktopLyrics, "桌面歌词", snap.desktop_open, false);
 
                         if let Some(rl) = r_lock {
                             let lf = fb_map.get(&TrayAction::ToggleDesktopLock).copied().unwrap_or_default();
-                            chrome::control_surface_alpha_radius(window, rl, lf, false, cont_a, 13.5);
+                            if lf.hover > 0.01 || lf.press > 0.01 {
+                                let hover_bg = if dark_card {
+                                    hsla(0.0, 0.0, 1.0, (0.09 * lf.hover + 0.05 * lf.press) * cont_a)
+                                } else {
+                                    hsla(0.0, 0.0, 0.0, (0.06 * lf.hover + 0.04 * lf.press) * cont_a)
+                                };
+                                chrome::fill_round(window, rl.x, rl.y, rl.w, rl.h, 8.0, hover_bg);
+                            }
                             icons::paint(
                                 window,
                                 cx,
                                 if snap.desktop_locked { Icon::Lock } else { Icon::Unlock },
                                 Box4::new(card.x + 14.0, rl.y + (rl.h - 16.0) * 0.5, 16.0, 16.0),
-                                text(0.55 + 0.25 * lf.hover),
+                                fg_icon,
                             );
                             chrome::paint_text_vcentred(
                                 window,
                                 "锁定桌面歌词",
                                 card.x + 38.0,
                                 rl.centre().1,
-                                12.0,
+                                12.5,
                                 500.0,
-                                text(0.88 + 0.08 * lf.hover),
+                                fg_main,
                             );
                             let track = Box4::new(card.right() - 46.0, rl.centre().1 - 10.0, 36.0, 20.0);
                             chrome::paint_switch_with_accent(
@@ -688,11 +730,7 @@ impl Render for TrayMenuPopover {
                             TrayAction::ToggleWallpaper,
                             r_wall,
                             Icon::Fullscreen,
-                            if snap.wallpaper_open {
-                                "退出壁纸模式"
-                            } else {
-                                "桌面壁纸模式"
-                            },
+                            "桌面壁纸",
                             snap.wallpaper_open,
                             false,
                         );
@@ -702,12 +740,12 @@ impl Render for TrayMenuPopover {
                         for dy in [div1_y, div2_y] {
                             chrome::fill_round(
                                 window,
-                                card.x + 12.0,
+                                card.x + 10.0,
                                 dy,
-                                (card.w - 24.0).max(20.0),
-                                0.75,
-                                0.35,
-                                text(0.08),
+                                (card.w - 20.0).max(20.0),
+                                1.0,
+                                0.5,
+                                div_col,
                             );
                         }
 

@@ -59,6 +59,7 @@ pub struct Settings {
     pub source_drag_grab_y: f32,
     pub source_row_offsets: std::collections::HashMap<&'static str, (f32, f32)>,
     pub has_local_lyrics: bool,
+    pub display_count: usize,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -115,6 +116,7 @@ impl Default for Settings {
             source_drag_grab_y: 0.0,
             source_row_offsets: std::collections::HashMap::new(),
             has_local_lyrics: false,
+            display_count: 1,
         }
     }
 }
@@ -192,6 +194,22 @@ impl Settings {
                     ];
                     rows.splice(pos + 1..pos + 1, beat_rows);
                 }
+            }
+        }
+        if self.kind == SettingsKind::Application && page == 0 && self.display_count > 1 {
+            if let Some(pos) = rows.iter().position(|item| item.key == "beatFollow") {
+                static DISPLAY_OPTS: &[(&str, &str)] = &[
+                    ("primary", "主显示器"),
+                    ("all", "全部屏幕"),
+                    ("display:0", "显示器 1"),
+                    ("display:1", "显示器 2"),
+                    ("display:2", "显示器 3"),
+                ];
+                let limit = (2 + self.display_count).min(DISPLAY_OPTS.len());
+                rows.insert(
+                    pos + 1,
+                    choice("window.wallpaperDisplay", "壁纸显示屏幕", &DISPLAY_OPTS[..limit]),
+                );
             }
         }
         if self.kind == SettingsKind::Application && page == 3 {
@@ -1416,6 +1434,7 @@ impl Settings {
             "lyrics.enabledSources.kugou" => Some("歌词来源"),
             "lyrics.matchThreshold" => Some("匹配与缓存"),
             "lyrics.autoTranslate" => Some("翻译"),
+            "window.closeAction" => Some("窗口行为"),
             "lyrics.playerSyncOffsets.apple" => Some("播放器同步"),
             "action.clearLyricsCache" => Some("缓存与数据"),
             "action.resetDefaults" => Some("重置"),

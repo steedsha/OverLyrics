@@ -165,18 +165,6 @@ pub(super) fn application_items(page: usize) -> Vec<Item> {
             segmented("windowBackground", "窗口背景", &[("immersion", "沉浸背景"), ("glass", "玻璃背景")]),
             toggle("immersionCompact", "迷你与歌词模式使用沉浸背景"),
             toggle("beatFollow", "沉浸背景跟随鼓点"),
-            action("action.toggleWallpaperMode", "桌面壁纸模式", "进入 / 退出", false),
-            choice(
-                "window.wallpaperDisplay",
-                "壁纸显示屏幕",
-                &[
-                    ("primary", "主显示器"),
-                    ("all", "全部屏幕"),
-                    ("display:0", "显示器 1"),
-                    ("display:1", "显示器 2"),
-                    ("display:2", "显示器 3"),
-                ],
-            ),
             slider("cornerRadius", "窗口与面板圆角", 0., 36., 1.),
         ],
         1 => vec![
@@ -251,7 +239,7 @@ pub(super) fn application_items(page: usize) -> Vec<Item> {
             segmented(
                 "window.closeAction",
                 "关闭窗口时",
-                &[("ask", "每次询问"), ("minimize", "最小化到托盘"), ("quit", "退出程序")],
+                &[("ask", "询问"), ("minimize", "托盘"), ("quit", "退出")],
             ),
             slider("lyrics.playerSyncOffsets.apple", "Apple Music 同步偏移", -2000., 2000., 50.),
             action("action.clearLyricsCache", "本地歌词缓存", "清除", false),

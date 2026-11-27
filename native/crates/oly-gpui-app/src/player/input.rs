@@ -3,12 +3,16 @@ use super::model::{Box4, Metrics};
 pub const MORE_LABELS: [&str; 4] = ["歌词同步", "歌词版本", "封面状态", "设置"];
 pub const MORE_MEDIA_LABEL: &str = "媒体";
 pub const MORE_DESKTOP_LABEL: &str = "桌面歌词";
+pub const MORE_WALLPAPER_LABEL: &str = "壁纸模式";
 pub const MODE_LABELS: [&str; 4] = ["迷你", "歌词", "窗口", "全屏"];
 pub fn more_size(view_height: f32) -> (f64, f64) {
-    more_size_with_media(view_height, false)
+    more_size_for_rows(view_height, 5)
 }
 pub fn more_size_with_media(view_height: f32, show_media: bool) -> (f64, f64) {
-    let base = if show_media { 260f32 } else { 224f32 };
+    more_size_for_rows(view_height, if show_media { 6 } else { 5 })
+}
+pub fn more_size_for_rows(view_height: f32, row_count: usize) -> (f64, f64) {
+    let base = 44.0_f32 + (row_count.max(1) as f32) * 36.0;
     (252., base.min((view_height - 16.).max(112.)) as f64)
 }
 pub fn mode_rect(r: Box4, i: u8) -> Box4 {
