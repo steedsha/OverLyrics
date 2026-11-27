@@ -76,14 +76,14 @@ cargo build --release -p oly-gpui-app --bin overlyrics
 <details>
 <summary>无法识别网易云音乐</summary>
 
-网易云音乐 PC 客户端默认未完整接入 Windows 系统媒体传输控制（SMTC），需安装 [BetterNCM](https://std.microblock.cc/betterncm) 并在其插件市场安装 **InfLink-rs** 插件后，重启网易云音乐即可正常识别与控制。
+网易云音乐 PC 客户端默认未完整接入 Windows 系统媒体传输控制（SMTC），需安装 [BetterNCM (chromatic)](https://github.com/std-microblock/chromatic) 并安装 **[InfLink-rs](https://github.com/apoint123/inflink-rs)** 插件后，重启网易云音乐即可正常识别与控制。
 
 </details>
 
 <details>
 <summary>无法识别 foobar2000</summary>
 
-foobar2000 默认未接入 Windows 系统媒体传输控制（SMTC），需安装 **[foo_mediacontrol](https://github.com/ghDaYuYu/foo_mediacontrol)** 插件并重启 foobar2000，即可正常识别播放状态、曲目信息与歌词同步。
+foobar2000 默认未接入 Windows 系统媒体传输控制（SMTC），需安装 **[foo_mediacontrol](https://github.com/dumbie/foo_mediacontrol)** 插件并重启 foobar2000，即可正常识别播放状态、曲目信息与歌词同步。
 
 </details>
 

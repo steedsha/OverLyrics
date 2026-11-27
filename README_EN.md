@@ -76,14 +76,14 @@ Due to differences across audio releases and lyric sources (such as intro length
 <details>
 <summary>NetEase Cloud Music is not detected</summary>
 
-The NetEase Cloud Music desktop client does not expose full Windows SMTC playback info by default. Install [BetterNCM](https://std.microblock.cc/betterncm) and its **InfLink-rs** plugin, then restart NetEase Cloud Music.
+The NetEase Cloud Music desktop client does not expose full Windows SMTC playback info by default. Install [BetterNCM (chromatic)](https://github.com/std-microblock/chromatic) and the **[InfLink-rs](https://github.com/apoint123/inflink-rs)** plugin, then restart NetEase Cloud Music.
 
 </details>
 
 <details>
 <summary>foobar2000 is not detected</summary>
 
-foobar2000 does not expose Windows System Media Transport Controls (SMTC) by default. Install the **[foo_mediacontrol](https://github.com/ghDaYuYu/foo_mediacontrol)** component and restart foobar2000 to enable playback detection and lyrics sync.
+foobar2000 does not expose Windows System Media Transport Controls (SMTC) by default. Install the **[foo_mediacontrol](https://github.com/dumbie/foo_mediacontrol)** component and restart foobar2000 to enable playback detection and lyrics sync.
 
 </details>
 
