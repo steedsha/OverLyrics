@@ -28,6 +28,27 @@ impl Render for PlayerView {
         if crate::updater::global().take_restart_ready() {
             self.pending_quit = true;
         }
+        if let Some(res) = self.close_dialog_bridge.take_result() {
+            self.close_dialog = None;
+            if res.remember {
+                self.change_setting(
+                    "window.closeAction",
+                    serde_json::json!(res.choice.as_config_str()),
+                );
+            }
+            match res.choice {
+                crate::player::close_dialog::CloseChoice::MinimizeToTray => {
+                    self.minimize_to_tray(cx);
+                }
+                crate::player::close_dialog::CloseChoice::Quit => {
+                    self.pending_quit = true;
+                }
+            }
+        }
+        if self.pending_minimize_to_tray {
+            self.pending_minimize_to_tray = false;
+            self.minimize_to_tray(cx);
+        }
         if self.pending_quit {
             self.pending_quit = false;
             self.settings.finish_edit(self.now_ms(), true);
@@ -35,9 +56,13 @@ impl Render for PlayerView {
                 let _ = child.update(cx, |_, w, _| w.remove_window());
             }
             if let Some(child) = self.desktop_child.take() {
+                self.persist_desktop_child_bounds(child, cx);
                 let _ = child.update(cx, |_, w, _| w.remove_window());
             }
             if let Some(child) = self.tray_menu.take() {
+                let _ = child.update(cx, |_, w, _| w.remove_window());
+            }
+            if let Some(child) = self.close_dialog.take() {
                 let _ = child.update(cx, |_, w, _| w.remove_window());
             }
             self.tray = None;
@@ -46,6 +71,15 @@ impl Render for PlayerView {
         if self.settings_host.is_none() {
             if self.main_hwnd.is_none() {
                 self.main_hwnd = crate::player::win32_window::hwnd_from_window(window);
+            }
+            if self.pending_close_dialog {
+                self.pending_close_dialog = false;
+                let this = cx.entity().downgrade();
+                window.defer(cx, move |w, cx| {
+                    let _ = this.update(cx, |pv, cx| {
+                        pv.open_close_confirm_dialog(w, cx);
+                    });
+                });
             }
             if self.pending_desktop_lyrics {
                 self.pending_desktop_lyrics = false;

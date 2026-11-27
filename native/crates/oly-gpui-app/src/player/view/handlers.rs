@@ -1093,7 +1093,26 @@ impl PlayerView {
                 self.pending_mode = Some(if self.last_fullscreen { self.pre_fullscreen_mode } else { 3 });
             }
             Some(Hot::WindowClose) => {
-                self.pending_quit = true;
+                if self.settings_host.is_some() {
+                    self.pending_quit = true;
+                } else {
+                    match self
+                        .settings
+                        .value("window.closeAction")
+                        .as_str()
+                        .unwrap_or("ask")
+                    {
+                        "minimize" => {
+                            self.pending_minimize_to_tray = true;
+                        }
+                        "quit" => {
+                            self.pending_quit = true;
+                        }
+                        _ => {
+                            self.pending_close_dialog = true;
+                        }
+                    }
+                }
             }
 
             Some(Hot::VolumeTrack) => {

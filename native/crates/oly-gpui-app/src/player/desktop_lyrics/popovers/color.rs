@@ -99,6 +99,7 @@ impl Render for DesktopColorPopover {
             self.was_active = true;
         } else if self.was_active && self.palette_drag.is_none() && !self.panel_dragging {
             self.bridge.mark_color_closed();
+            self.bridge.push_popover(PopoverAction::DismissCascadeIfInactive);
             window.remove_window();
             return div().into_any_element();
         }

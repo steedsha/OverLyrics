@@ -749,6 +749,7 @@ impl Render for DesktopDisplayPopover {
             self.was_active = true;
         } else if self.was_active && !self.panel_dragging && !color_open && !lines_open {
             self.bridge.mark_display_closed();
+            self.bridge.push_popover(PopoverAction::DismissCascadeIfInactive);
             window.remove_window();
             return div().into_any_element();
         }
@@ -1128,6 +1129,7 @@ impl Render for DesktopLinesPopover {
             self.was_active = true;
         } else if self.was_active && !self.panel_dragging {
             self.bridge.mark_lines_closed();
+            self.bridge.push_popover(PopoverAction::DismissCascadeIfInactive);
             window.remove_window();
             return div().into_any_element();
         }

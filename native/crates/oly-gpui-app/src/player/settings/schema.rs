@@ -236,6 +236,11 @@ pub(super) fn application_items(page: usize) -> Vec<Item> {
             ]),
         ],
         5 => vec![
+            segmented(
+                "window.closeAction",
+                "关闭窗口时",
+                &[("ask", "每次询问"), ("minimize", "最小化到托盘"), ("quit", "退出程序")],
+            ),
             slider("lyrics.playerSyncOffsets.apple", "Apple Music 同步偏移", -2000., 2000., 50.),
             action("action.clearLyricsCache", "本地歌词缓存", "清除", false),
             action("action.clearCoverCache", "动态封面缓存", "清除", false),

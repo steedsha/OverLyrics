@@ -172,12 +172,8 @@ impl DesktopLyricsConfig {
         let (min_w, min_h) = self.orientation.min_window_size();
         let (max_w, max_h) = self.orientation.max_window_size();
         let saved = match self.orientation {
-            DesktopOrientation::Horizontal => self
-                .horizontal_size
-                .or_else(|| self.vertical_size.map(|(vw, vh)| (vh, vw))),
-            DesktopOrientation::Vertical => self
-                .vertical_size
-                .or_else(|| self.horizontal_size.map(|(hw, hh)| (hh, hw))),
+            DesktopOrientation::Horizontal => self.horizontal_size,
+            DesktopOrientation::Vertical => self.vertical_size,
         };
         match saved {
             Some((w, h)) => (w.clamp(min_w, max_w), h.clamp(min_h, max_h)),
@@ -189,21 +185,12 @@ impl DesktopLyricsConfig {
         let (min_w, min_h) = self.orientation.min_window_size();
         let (max_w, max_h) = self.orientation.max_window_size();
         let clamped = (w.clamp(min_w, max_w), h.clamp(min_h, max_h));
-        // Keep horizontal and vertical sizes unified by mirroring (long, short) across orientations.
         match self.orientation {
             DesktopOrientation::Horizontal => {
                 self.horizontal_size = Some(clamped);
-                self.vertical_size = Some((
-                    clamped.1.clamp(VERT_MIN_W, VERT_MAX_W),
-                    clamped.0.clamp(VERT_MIN_H, VERT_MAX_H),
-                ));
             }
             DesktopOrientation::Vertical => {
                 self.vertical_size = Some(clamped);
-                self.horizontal_size = Some((
-                    clamped.1.clamp(HORIZ_MIN_W, HORIZ_MAX_W),
-                    clamped.0.clamp(HORIZ_MIN_H, HORIZ_MAX_H),
-                ));
             }
         }
     }

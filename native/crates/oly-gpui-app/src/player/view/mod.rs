@@ -69,6 +69,10 @@ pub struct PlayerView {
     tray: Option<super::tray::TrayService>,
     tray_menu: Option<AnyWindowHandle>,
     tray_bridge: Arc<super::tray::SharedTrayBridge>,
+    close_dialog: Option<AnyWindowHandle>,
+    close_dialog_bridge: Arc<super::close_dialog::SharedCloseDialogBridge>,
+    pending_close_dialog: bool,
+    pending_minimize_to_tray: bool,
     pending_settings_window:Option<usize>,
     pending_settings_after_mode: bool,
     sync_settings_child_config: bool,
@@ -307,7 +311,7 @@ impl PlayerView {
         } else {
             None
         };
-        let mut this = Self {settings_host:None,settings_child:None,settings_child_view:None,desktop_child:None,desktop_bridge:super::desktop_lyrics::SharedDesktopBridge::new(),desktop_candidates_cache:Arc::new(Vec::new()),desktop_candidates_next_ms:0.0,pending_desktop_lyrics:false,main_hwnd:None,tray,tray_menu:None,tray_bridge:tray_bridge.clone(),pending_settings_window:None,pending_settings_after_mode:false,sync_settings_child_config:false,pending_import_rx:None,native_background:None,doc_auto_picked:false,auto_pick_persisted:false,qa_frame_sample:None,smart_translation_worker:None,translation_signature:None,translated_rows:Vec::new(),search_config:None,priority_config:None,pressed_candidate:None,
+        let mut this = Self {settings_host:None,settings_child:None,settings_child_view:None,desktop_child:None,desktop_bridge:super::desktop_lyrics::SharedDesktopBridge::new(),desktop_candidates_cache:Arc::new(Vec::new()),desktop_candidates_next_ms:0.0,pending_desktop_lyrics:false,main_hwnd:None,tray,tray_menu:None,tray_bridge:tray_bridge.clone(),close_dialog:None,close_dialog_bridge:super::close_dialog::SharedCloseDialogBridge::new(),pending_close_dialog:false,pending_minimize_to_tray:false,pending_settings_window:None,pending_settings_after_mode:false,sync_settings_child_config:false,pending_import_rx:None,native_background:None,doc_auto_picked:false,auto_pick_persisted:false,qa_frame_sample:None,smart_translation_worker:None,translation_signature:None,translated_rows:Vec::new(),search_config:None,priority_config:None,pressed_candidate:None,
             cfg,
             focus: cx.focus_handle(),
             scene: None,
@@ -2384,6 +2388,81 @@ impl PlayerView {
         }
     }
 
+    pub fn save_desktop_lyrics_cfg(&mut self, cfg: &super::desktop_lyrics::DesktopLyricsConfig) {
+        let patch = cfg.to_patch();
+        if let Some(live) = self.live.as_ref() {
+            let _ = live.config.patch(patch.clone());
+        }
+        if let Some(obj) = self.settings.config.as_object_mut() {
+            if let Some(dl) = patch.get("desktopLyrics") {
+                obj.insert("desktopLyrics".into(), dl.clone());
+            }
+        }
+    }
+
+    pub(super) fn persist_desktop_child_bounds(&mut self, child: AnyWindowHandle, cx: &mut App) {
+        let mut cfg = self.desktop_bridge.read_cfg();
+        let _ = child.update(cx, |_, w, _| {
+            let b = w.bounds();
+            cfg.set_pos(f32::from(b.origin.x), f32::from(b.origin.y));
+            cfg.set_size(f32::from(b.size.width), f32::from(b.size.height));
+        });
+        self.desktop_bridge.set_cfg(cfg.clone());
+        self.save_desktop_lyrics_cfg(&cfg);
+    }
+
+    pub(super) fn minimize_to_tray(&mut self, cx: &mut App) {
+        if let Some(child) = self.settings_child.take() {
+            let _ = child.update(cx, |_, w, _| w.remove_window());
+        }
+        if let Some(child) = self.close_dialog.take() {
+            let _ = child.update(cx, |_, w, _| w.remove_window());
+        }
+        self.settings.open = false;
+        self.picker_open = false;
+        self.tool.set_more_open(false);
+        if let Some(h) = self.main_hwnd {
+            super::win32_window::set_window_visible(h, false);
+        }
+    }
+
+    pub(super) fn open_close_confirm_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(old) = self.close_dialog.take() {
+            let _ = old.update(cx, |_, w, _| w.remove_window());
+        }
+        let origin = super::close_dialog::dialog_origin_for(window, cx);
+        let bounds = super::close_dialog::dialog_bounds(origin);
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            titlebar: Some(TitlebarOptions {
+                title: Some("关闭窗口".into()),
+                appears_transparent: true,
+                traffic_light_position: None,
+            }),
+            window_background: WindowBackgroundAppearance::Transparent,
+            is_resizable: false,
+            is_minimizable: false,
+            focus: true,
+            display_id: window.display(cx).map(|d| d.id()),
+            ..Default::default()
+        };
+        let bridge = self.close_dialog_bridge.clone();
+        let theme_mode = self.display.theme_mode;
+        let corner_radius = self.display.corner_radius;
+        let accent_hex = self.display.accent_hex;
+        if let Ok((child, _)) = gpui_kit::open_window(options, cx, move |_, cx| {
+            cx.new(|_| super::close_dialog::CloseConfirmDialog::new(bridge, theme_mode, corner_radius, accent_hex))
+        }) {
+            if let Some(root) = child.downcast::<gpui_kit::base::Root>() {
+                let _ = root.update(cx, |r, _, cx| {
+                    r.style().background = Some(gpui_kit::transparent_black().into());
+                    cx.notify();
+                });
+            }
+            self.close_dialog = Some(child);
+        }
+    }
+
     pub fn restore_from_desktop_lyrics(&mut self) {
         self.desktop_child = None;
         if let Some(h) = self.main_hwnd {
@@ -2414,6 +2493,7 @@ impl PlayerView {
                 }
                 super::tray::TrayAction::ToggleDesktopLyrics => {
                     if let Some(child) = self.desktop_child.take() {
+                        self.persist_desktop_child_bounds(child, cx);
                         let _ = child.update(cx, |_, w, _| w.remove_window());
                         self.restore_from_desktop_lyrics();
                     } else {
@@ -3047,10 +3127,14 @@ impl PlayerView {
         let mut cfg = super::desktop_lyrics::DesktopLyricsConfig::from_config(&self.settings.config);
         cfg.locked = false;
         let (w, h) = cfg.window_size();
-        let (rx, ry) = cfg
-            .saved_pos()
-            .unwrap_or_else(|| super::desktop_lyrics::default_origin_for(cfg.orientation, window, cx));
-        let (x, y) = super::desktop_lyrics::clamp_origin(rx, ry, w, h, window, cx);
+        let ((x, y), display_id) = super::desktop_lyrics::resolve_restored_origin(
+            cfg.saved_pos(),
+            w,
+            h,
+            cfg.orientation,
+            window,
+            cx,
+        );
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(gpui_kit::bounds(
                 point(px(x), px(y)),
@@ -3065,7 +3149,7 @@ impl PlayerView {
             is_resizable: false,
             is_minimizable: false,
             focus: false,
-            display_id: window.display(cx).map(|d| d.id()),
+            display_id,
             ..Default::default()
         };
         let bridge = self.desktop_bridge.clone();

@@ -175,6 +175,17 @@ mod tests {
         };
         let parsed = DesktopLyricsConfig::from_config(&cfg.to_patch());
         assert_eq!(parsed, cfg);
+
+        let mut indep = DesktopLyricsConfig::default();
+        indep.orientation = DesktopOrientation::Horizontal;
+        indep.set_size(980.0, 170.0);
+        assert_eq!(indep.horizontal_size, Some((980.0, 170.0)));
+        assert_eq!(indep.vertical_size, None);
+        indep.orientation = DesktopOrientation::Vertical;
+        assert_eq!(indep.window_size(), (VERT_W, VERT_H));
+        indep.set_size(180.0, 760.0);
+        assert_eq!(indep.vertical_size, Some((180.0, 760.0)));
+        assert_eq!(indep.horizontal_size, Some((980.0, 170.0)));
     }
 
     #[::std::prelude::v1::test]

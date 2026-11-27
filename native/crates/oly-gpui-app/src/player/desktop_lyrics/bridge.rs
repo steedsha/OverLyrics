@@ -74,6 +74,7 @@ pub enum PopoverAction {
     OpenLinesPopover(Box4, f32),
     CloseLinesPopover,
     OpenLyricsPicker,
+    DismissCascadeIfInactive,
     ReturnToMain,
 }
 

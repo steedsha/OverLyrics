@@ -11,7 +11,8 @@
     },
     "alwaysOnTop": false,
     "fullscreen": false,
-    "topDefaultMigrated": false
+    "topDefaultMigrated": false,
+    "closeAction": "ask"
   },
   "display": {
     "fontSize": 68,

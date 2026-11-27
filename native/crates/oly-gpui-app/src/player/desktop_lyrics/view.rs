@@ -127,6 +127,11 @@ pub struct DesktopLyricsView {
     leave_at_ms: Option<f64>,
     toast: Option<(String, f64)>,
     last_row_idx: Option<usize>,
+    last_track_sig: String,
+    multi_scroll_spring: Spring,
+    prev_multi_rows: Vec<(usize, Row)>,
+    outgoing_multi_row: Option<(usize, Row)>,
+    outgoing_step_h: f32,
     line_fade_start_ms: f64,
     last_origin: Option<(f32, f32)>,
     last_size: Option<(f32, f32)>,
@@ -189,6 +194,15 @@ impl DesktopLyricsView {
             leave_at_ms: None,
             toast: None,
             last_row_idx: None,
+            last_track_sig: String::new(),
+            multi_scroll_spring: {
+                let mut s = Spring::new(0.0);
+                s.update_params(SpringParams::new(260.0, 28.0));
+                s
+            },
+            prev_multi_rows: Vec::new(),
+            outgoing_multi_row: None,
+            outgoing_step_h: 0.0,
             line_fade_start_ms: 0.0,
             last_origin: None,
             last_size: None,
@@ -314,6 +328,8 @@ impl DesktopLyricsView {
         let b = window.bounds();
         self.cfg
             .set_pos(f32::from(b.origin.x), f32::from(b.origin.y));
+        self.cfg
+            .set_size(f32::from(b.size.width), f32::from(b.size.height));
         self.cfg.orientation = orient;
         self.bridge.set_cfg(self.cfg.clone());
         let (raw_w, raw_h) = self.cfg.window_size();
@@ -327,11 +343,7 @@ impl DesktopLyricsView {
         let (min_w, min_h) = orient.min_window_size();
         let (max_w, max_h) = orient.max_window_size_for_display(disp_w, disp_h);
         let (w, h) = (raw_w.clamp(min_w, max_w), raw_h.clamp(min_h, max_h));
-        let (nx, ny) = self
-            .cfg
-            .saved_pos()
-            .unwrap_or_else(|| default_origin_for(orient, window, cx));
-        let clamped = clamp_origin(nx, ny, w, h, window, cx);
+        let (clamped, _) = resolve_restored_origin(self.cfg.saved_pos(), w, h, orient, window, cx);
         window.set_bounds(gpui_kit::bounds(
             point(px(clamped.0), px(clamped.1)),
             size(px(w), px(h)),
@@ -341,6 +353,7 @@ impl DesktopLyricsView {
         self.trans_side_inited = false;
         self.bar_side_inited = false;
         self.cfg.set_pos(clamped.0, clamped.1);
+        self.cfg.set_size(w, h);
         self.bridge.set_cfg(self.cfg.clone());
         self.bridge
             .push(DesktopCommand::SaveConfig(self.cfg.clone()));
@@ -516,6 +529,7 @@ impl DesktopLyricsView {
         card_w: f32,
         card_h: f32,
         align_y_in_card: f32,
+        preferred_side: i8,
         window: &Window,
         cx: &App,
     ) -> ((f32, f32), i8) {
@@ -536,10 +550,44 @@ impl DesktopLyricsView {
         let gap = 8.0_f32;
         let right_x = parent_card_screen.right() + gap - POPOVER_ELASTIC_PAD;
         let left_x = parent_card_screen.x - gap - card_w - POPOVER_ELASTIC_PAD;
-        let (px_c, side): (f32, i8) = if right_x + pw <= dx + dw - 6.0 {
-            (right_x, 1)
-        } else {
-            (left_x.max(dx + 6.0), -1)
+        let min_x = dx + 6.0;
+        let max_x = (dx + dw - pw - 6.0).max(min_x);
+        let right_fits = right_x + pw <= dx + dw - 6.0;
+        let left_fits = left_x >= min_x;
+        let (px_c, side): (f32, i8) = match preferred_side {
+            -1 => {
+                // L2 opened to the left of L1: L3 must prefer continuing left,
+                // clamping at the left edge instead of jumping right over L1.
+                if left_fits {
+                    (left_x, -1)
+                } else {
+                    (left_x.clamp(min_x, max_x), -1)
+                }
+            }
+            1 => {
+                // L2 opened to the right of L1: L3 must prefer continuing right,
+                // clamping at the right edge instead of jumping left over L1.
+                if right_fits {
+                    (right_x, 1)
+                } else {
+                    (right_x.clamp(min_x, max_x), 1)
+                }
+            }
+            _ => {
+                if right_fits {
+                    (right_x, 1)
+                } else if left_fits {
+                    (left_x, -1)
+                } else {
+                    let space_right = (dx + dw) - parent_card_screen.right();
+                    let space_left = parent_card_screen.x - dx;
+                    if space_right >= space_left {
+                        (right_x.clamp(min_x, max_x), 1)
+                    } else {
+                        (left_x.clamp(min_x, max_x), -1)
+                    }
+                }
+            }
         };
         let py_c = (row_center_y_screen - align_y_in_card - POPOVER_ELASTIC_PAD)
             .clamp(dy + 6.0, (dy + dh - ph - 6.0).max(dy + 6.0));
@@ -575,6 +623,7 @@ impl DesktopLyricsView {
             card_w,
             card_h,
             26.0,
+            0,
             window,
             cx,
         );
@@ -623,12 +672,14 @@ impl DesktopLyricsView {
         } else {
             list_top_in_card + COLOR_PRESETS.len() as f32 * item_h + 6.0 + item_h * 0.5
         };
+        let preferred_side = self.bridge.display_popover_side.load(Ordering::SeqCst);
         let (pos, side) = Self::side_popover_origin(
             parent_card_screen,
             color_row_center_y_screen,
             card_w,
             card_h,
             selected_row_center_in_card,
+            preferred_side,
             window,
             cx,
         );
@@ -669,12 +720,14 @@ impl DesktopLyricsView {
         let ph = card_h + POPOVER_ELASTIC_PAD * 2.0;
         let sel_idx = self.cfg.display_lines.clamp(1, 3).saturating_sub(1) as f32;
         let align_y = 8.0 + sel_idx * 32.0 + 16.0;
+        let preferred_side = self.bridge.display_popover_side.load(Ordering::SeqCst);
         let (pos, side) = Self::side_popover_origin(
             parent_card_screen,
             row_center_y_screen,
             card_w,
             card_h,
             align_y,
+            preferred_side,
             window,
             cx,
         );
@@ -836,6 +889,60 @@ pub fn clamp_origin(
     let max_x = (min_x + f32::from(b.size.width) - w).max(min_x);
     let max_y = (min_y + f32::from(b.size.height) - h).max(min_y);
     (x.clamp(min_x, max_x), y.clamp(min_y, max_y))
+}
+
+/// Resolves a saved desktop-lyrics origin across all currently connected displays.
+/// If the saved rectangle falls outside every visible work area (e.g. a monitor was
+/// disconnected), safely falls back to the primary display's default position.
+pub fn resolve_restored_origin(
+    saved: Option<(f32, f32)>,
+    w: f32,
+    h: f32,
+    orientation: DesktopOrientation,
+    window: &Window,
+    cx: &App,
+) -> ((f32, f32), Option<DisplayId>) {
+    let displays = cx.displays();
+    if let Some((sx, sy)) = saved {
+        let mut best: Option<(f32, (f32, f32), DisplayId)> = None;
+        for d in &displays {
+            let vb = d.visible_bounds();
+            let dx = f32::from(vb.origin.x);
+            let dy = f32::from(vb.origin.y);
+            let dw = f32::from(vb.size.width).max(1.0);
+            let dh = f32::from(vb.size.height).max(1.0);
+            let ox = (sx + w).min(dx + dw) - sx.max(dx);
+            let oy = (sy + h).min(dy + dh) - sy.max(dy);
+            if ox >= 48.0 && oy >= 32.0 {
+                let area = ox * oy;
+                let max_x = (dx + dw - w).max(dx);
+                let max_y = (dy + dh - h).max(dy);
+                let clamped = (sx.clamp(dx, max_x), sy.clamp(dy, max_y));
+                if best.is_none_or(|(best_area, _, _)| area > best_area) {
+                    best = Some((area, clamped, d.id()));
+                }
+            }
+        }
+        if let Some((_, pos, did)) = best {
+            return (pos, Some(did));
+        }
+    }
+    if let Some(primary) = cx.primary_display().or_else(|| window.display(cx)) {
+        let vb = primary.visible_bounds();
+        let dx = f32::from(vb.origin.x);
+        let dy = f32::from(vb.origin.y);
+        let dw = f32::from(vb.size.width).max(1.0);
+        let dh = f32::from(vb.size.height).max(1.0);
+        let (def_x, def_y) = match orientation {
+            DesktopOrientation::Horizontal => (dx + (dw - w) * 0.5, dy + dh - h - 48.0),
+            DesktopOrientation::Vertical => (dx + dw - w - 28.0, dy + (dh - h) * 0.5),
+        };
+        let max_x = (dx + dw - w).max(dx);
+        let max_y = (dy + dh - h).max(dy);
+        return ((def_x.clamp(dx, max_x), def_y.clamp(dy, max_y)), Some(primary.id()));
+    }
+    let def = default_origin_for(orientation, window, cx);
+    (clamp_origin(def.0, def.1, w, h, window, cx), window.display(cx).map(|d| d.id()))
 }
 
 fn word_progress(pos_ms: f64, start_ms: f64, end_ms: f64) -> f32 {
@@ -1419,10 +1526,32 @@ impl Render for DesktopLyricsView {
                 PopoverAction::OpenLyricsPicker => {
                     self.open_lyrics_picker_popover(window, cx);
                 }
+                PopoverAction::DismissCascadeIfInactive => {
+                    let any_active = [
+                        self.more_popover,
+                        self.display_popover,
+                        self.color_popover,
+                        self.lines_popover,
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .any(|h| h.update(cx, |_, w, _| w.is_window_active()).unwrap_or(false));
+                    if !any_active {
+                        self.close_popovers(cx);
+                    }
+                }
                 PopoverAction::ReturnToMain => {
+                    let wb = window.bounds();
+                    self.cfg
+                        .set_pos(f32::from(wb.origin.x), f32::from(wb.origin.y));
+                    self.cfg
+                        .set_size(f32::from(wb.size.width), f32::from(wb.size.height));
+                    self.bridge.set_cfg(self.cfg.clone());
+                    let saved_cfg = self.cfg.clone();
                     self.close_popovers(cx);
                     let parent = self.parent.clone();
                     let _ = parent.update(cx, |pv, _| {
+                        pv.save_desktop_lyrics_cfg(&saved_cfg);
                         pv.restore_from_desktop_lyrics();
                     });
                     window.remove_window();
@@ -1594,14 +1723,68 @@ impl Render for DesktopLyricsView {
         }
 
         let snap = self.bridge.read_snapshot();
+        let track_sig = format!("{}\0{}", snap.track_title, snap.track_artist);
+        let track_changed = !self.last_track_sig.is_empty() && track_sig != self.last_track_sig;
+        if track_sig != self.last_track_sig {
+            self.last_track_sig = track_sig;
+        }
+        if track_changed {
+            self.multi_scroll_spring.set_position(0.0);
+            self.multi_scroll_spring.set_target_position(0.0);
+            self.outgoing_multi_row = None;
+            self.outgoing_step_h = 0.0;
+            self.prev_multi_rows.clear();
+        }
         if snap.active_row_index != self.last_row_idx {
-            let first = self.last_row_idx.is_none();
+            let prev_idx = self.last_row_idx;
+            let first = prev_idx.is_none();
             self.last_row_idx = snap.active_row_index;
             self.line_fade_start_ms = if first { now - 1000.0 } else { now };
             self.vert_main_scroll = 0.0;
             self.vert_trans_scroll = 0.0;
             self.horiz_main_scroll = 0.0;
             self.horiz_trans_scroll = 0.0;
+
+            let normal_advance = !track_changed
+                && self.cfg.orientation == DesktopOrientation::Horizontal
+                && self.cfg.display_lines > 1
+                && match (prev_idx, snap.active_row_index) {
+                    (Some(p), Some(n)) => n > p && n - p <= 2,
+                    _ => false,
+                };
+            if normal_advance {
+                if let Some((out_idx, out_row)) = self.prev_multi_rows.first().cloned() {
+                    let still_present = snap.display_rows.iter().any(|(i, _)| *i == out_idx);
+                    if !still_present {
+                        let base_h = self.cfg.font_size * 0.95;
+                        let trans_h = if self.cfg.show_translation && !out_row.translation.trim().is_empty() {
+                            base_h * 0.65
+                        } else {
+                            0.0
+                        };
+                        let step_h = (base_h + trans_h + 6.0).clamp(24.0, 96.0);
+                        self.outgoing_multi_row = Some((out_idx, out_row));
+                        self.outgoing_step_h = step_h;
+                        self.multi_scroll_spring.set_position(step_h as f64);
+                        self.multi_scroll_spring.set_target_position(0.0);
+                    }
+                }
+            } else {
+                self.multi_scroll_spring.set_position(0.0);
+                self.multi_scroll_spring.set_target_position(0.0);
+                self.outgoing_multi_row = None;
+                self.outgoing_step_h = 0.0;
+            }
+        }
+        self.multi_scroll_spring.update(dt / 1000.0);
+        let multi_offset_y = self.multi_scroll_spring.position() as f32;
+        if self.outgoing_multi_row.is_some() && multi_offset_y.abs() < 0.4 {
+            self.outgoing_multi_row = None;
+            self.outgoing_step_h = 0.0;
+            self.multi_scroll_spring.set_position(0.0);
+        }
+        if !snap.display_rows.is_empty() {
+            self.prev_multi_rows = snap.display_rows.clone();
         }
         let line_fade = ((now - self.line_fade_start_ms) / 180.0).clamp(0.0, 1.0) as f32;
 
@@ -1640,7 +1823,16 @@ impl Render for DesktopLyricsView {
         if let Some(h) = self.more_popover {
             if !open_wins.contains(&h) {
                 self.more_popover = None;
+                self.close_display_popover(cx);
+            }
+        }
+        if let Some(h) = self.display_popover {
+            if !open_wins.contains(&h) {
+                self.display_popover = None;
+                self.bridge.display_popover_open.store(false, Ordering::SeqCst);
+                self.bridge.display_popover_side.store(0, Ordering::SeqCst);
                 self.close_color_popover(cx);
+                self.close_lines_popover(cx);
             }
         }
         if let Some(h) = self.color_popover {
@@ -1650,6 +1842,13 @@ impl Render for DesktopLyricsView {
                 self.bridge.color_popover_side.store(0, Ordering::SeqCst);
             }
         }
+        if let Some(h) = self.lines_popover {
+            if !open_wins.contains(&h) {
+                self.lines_popover = None;
+                self.bridge.lines_popover_open.store(false, Ordering::SeqCst);
+                self.bridge.lines_popover_side.store(0, Ordering::SeqCst);
+            }
+        }
         if let Some(h) = self.picker_popover {
             if !open_wins.contains(&h) {
                 self.picker_popover = None;
@@ -1657,7 +1856,9 @@ impl Render for DesktopLyricsView {
         }
         let any_popover_open = self.volume_popover.is_some()
             || self.more_popover.is_some()
+            || self.display_popover.is_some()
             || self.color_popover.is_some()
+            || self.lines_popover.is_some()
             || self.picker_popover.is_some();
         let hovering = !self.cfg.locked
             && (os_cursor_inside
@@ -1836,7 +2037,8 @@ impl Render for DesktopLyricsView {
                 .sum();
             let avail_per_slot = ((win_h - 20.0) / bilingual_slots.max(1.0)).max(18.0);
             let fit_scale = (avail_per_slot / (font_size * 1.25)).clamp(0.38, 1.0);
-            snap.display_rows
+            let mut shaped_list: Vec<(usize, Row, Arc<RowLines>)> = snap
+                .display_rows
                 .iter()
                 .take(count)
                 .filter_map(|(idx, r)| {
@@ -1849,13 +2051,30 @@ impl Render for DesktopLyricsView {
                         0.86
                     };
                     let row_fs = (font_size * fit_scale * role_scale).clamp(13.0, MAX_FONT);
-                    self.shape_single_line(r, &snap.display, row_fs, horiz_avail_w, false)
+                    let row_auto_scroll = auto_scroll && is_active && !r.is_bg;
+                    self.shape_single_line(r, &snap.display, row_fs, horiz_avail_w, row_auto_scroll)
                         .map(|s| (*idx, r.clone(), s))
                 })
-                .collect()
+                .collect();
+            let _ = &mut shaped_list;
+            shaped_list
         } else {
             Vec::new()
         };
+        let shaped_outgoing: Option<(Row, Arc<RowLines>)> = if !shaped_multi.is_empty() {
+            self.outgoing_multi_row.clone().and_then(|(_, r)| {
+                let row_fs = shaped_multi
+                    .first()
+                    .map(|(_, _, s)| s.font_size)
+                    .unwrap_or(font_size * 0.8)
+                    .clamp(13.0, MAX_FONT);
+                self.shape_single_line(&r, &snap.display, row_fs, horiz_avail_w, false)
+                    .map(|s| (r, s))
+            })
+        } else {
+            None
+        };
+        let outgoing_step_h = self.outgoing_step_h;
 
         // Smooth progress-driven scrolling (or fit-by-font-size when auto_scroll is off) for both orientations.
         let mut vert_main_scroll = self.vert_main_scroll;
@@ -1867,7 +2086,15 @@ impl Render for DesktopLyricsView {
         let scroll_alpha = (1.0 - (-dt / 180.0).exp()) as f32;
 
         if orient == DesktopOrientation::Horizontal {
-            if let (Some(row), Some(shaped)) = (snap.active_row.as_ref(), shaped_active.as_ref()) {
+            let active_horiz = if !shaped_multi.is_empty() {
+                shaped_multi
+                    .iter()
+                    .find(|(idx, r, _)| Some(*idx) == snap.active_row_index && !r.is_bg)
+                    .map(|(_, r, s)| (r, s))
+            } else {
+                snap.active_row.as_ref().zip(shaped_active.as_ref())
+            };
+            if let Some((row, shaped)) = active_horiz {
                 if auto_scroll {
                     let natural_w = shaped
                         .lines
@@ -1886,7 +2113,11 @@ impl Render for DesktopLyricsView {
                     horiz_main_scroll = self.horiz_main_scroll;
 
                     if show_trans && !row.translation.trim().is_empty() {
-                        let trans_fs = (shaped.font_size * 0.62).clamp(12.0, 40.0);
+                        let trans_fs = if !shaped_multi.is_empty() {
+                            (shaped.font_size * 0.58).clamp(10.5, 26.0)
+                        } else {
+                            (shaped.font_size * 0.62).clamp(12.0, 40.0)
+                        };
                         let (tw, _) = chrome::measure(window, row.translation.trim(), trans_fs, 500.0);
                         let max_tx = (tw - horiz_avail_w).max(0.0);
                         let target_tx = max_tx * smoothstep01(adj);
@@ -2317,6 +2548,7 @@ impl Render for DesktopLyricsView {
                                 DesktopOrientation::Horizontal => {
                                     if !shaped_multi.is_empty() {
                                         let gap = 5.0_f32;
+                                        let pad_x = 24.0_f32;
                                         let total_h: f32 = shaped_multi
                                             .iter()
                                             .enumerate()
@@ -2330,92 +2562,196 @@ impl Render for DesktopLyricsView {
                                                 s.line_height + th + if k > 0 { gap } else { 0.0 }
                                             })
                                             .sum();
-                                        let mut cur_y = horiz_area_top + (horiz_area_h - total_h) * 0.5;
-                                        let origin_x = (win_w - horiz_avail_w) * 0.5;
-                                        for (idx, r, s) in &shaped_multi {
-                                            let is_active = Some(*idx) == snap.active_row_index
-                                                || (r.is_bg
-                                                    && snap.position_ms >= r.start_ms
-                                                    && snap.position_ms <= r.end_ms + 300.0);
-                                            let dim = if is_active {
-                                                if r.is_bg { 0.84 } else { 1.0 }
-                                            } else if r.is_bg {
-                                                0.46
-                                            } else {
-                                                0.54
-                                            };
-                                            let light = row_light(r, snap.position_ms, is_active, false, &snap.display);
-                                            let progress = paint::line_progress(
-                                                snap.position_ms,
-                                                r.start_ms,
-                                                r.duration_ms(),
-                                            );
-                                            let masks: Vec<f32> = s
-                                                .masks
-                                                .iter()
-                                                .map(|frames| position_at(frames, progress))
-                                                .collect();
-                                            let row_light_val = RowLight {
-                                                base: (light.dark * dim * line_fade).clamp(0.0, 1.0),
-                                                dark: (light.dark * dim * line_fade).clamp(0.0, 1.0),
-                                                bright: (light.bright * dim * line_fade).clamp(0.0, 1.0),
-                                                mask: if is_active && light.sweep.is_some() {
-                                                    Some(masks)
-                                                } else {
-                                                    None
-                                                },
-                                                glow: if is_active {
-                                                    light.glow.map(|mut g| {
-                                                        for v in &mut g {
-                                                            *v *= dim * line_fade;
+                                        let base_top_y = horiz_area_top + (horiz_area_h - total_h) * 0.5;
+                                        let slide_t = if outgoing_step_h > 1.0 {
+                                            1.0 - (multi_offset_y / outgoing_step_h).clamp(0.0, 1.0)
+                                        } else {
+                                            1.0
+                                        };
+                                        window.with_content_mask(
+                                            Some(ContentMask {
+                                                bounds: gpui_kit::bounds(
+                                                    point(px(0.0), px(horiz_area_top - 4.0)),
+                                                    gpui_kit::size(px(win_w), px(horiz_area_h + 8.0)),
+                                                ),
+                                            }),
+                                            |window| {
+                                                let origin_x_center = (win_w - horiz_avail_w) * 0.5;
+                                                // Outgoing top line slides up & fades out smoothly
+                                                if let Some((out_r, out_s)) = shaped_outgoing.as_ref() {
+                                                    let out_fade = (1.0 - slide_t).clamp(0.0, 1.0);
+                                                    if out_fade > 0.02 {
+                                                        let out_tfs = (out_s.font_size * 0.58).clamp(10.5, 26.0);
+                                                        let out_th = if show_trans && !out_r.translation.trim().is_empty() {
+                                                            2.0 + out_tfs * 1.18
+                                                        } else {
+                                                            0.0
+                                                        };
+                                                        let out_y = base_top_y + multi_offset_y - (out_s.line_height + out_th + gap);
+                                                        let out_dim = if out_r.is_bg { 0.42 } else { 0.52 } * out_fade;
+                                                        let out_light = RowLight {
+                                                            base: out_dim,
+                                                            dark: out_dim,
+                                                            bright: out_dim,
+                                                            mask: None,
+                                                            glow: None,
+                                                        };
+                                                        paint::paint_row_with_shadow(
+                                                            window,
+                                                            out_s,
+                                                            origin_x_center,
+                                                            out_y,
+                                                            out_s.line_height,
+                                                            out_s.font_size,
+                                                            &out_s.words,
+                                                            &out_light,
+                                                            snap.position_ms,
+                                                            1.0,
+                                                            WrapperTransform::default(),
+                                                            -10000.0,
+                                                            10000.0,
+                                                            1.0,
+                                                            horiz_avail_w,
+                                                            LineAlign::Center,
+                                                            0.0,
+                                                            DESKTOP_DROP_SHADOW,
+                                                            Some(text_color),
+                                                        );
+                                                        if show_trans && !out_r.translation.trim().is_empty() {
+                                                            paint_horiz_translation(
+                                                                window,
+                                                                &out_r.translation,
+                                                                win_w,
+                                                                out_y + out_s.line_height + 2.0,
+                                                                out_tfs,
+                                                                text_color,
+                                                                (snap.display.trans_current.max(0.75) * out_dim).clamp(0.0, 1.0),
+                                                                false,
+                                                                0.0,
+                                                            );
                                                         }
-                                                        g
-                                                    })
-                                                } else {
-                                                    None
-                                                },
-                                            };
-                                            paint::paint_row_with_shadow(
-                                                window,
-                                                s,
-                                                origin_x,
-                                                cur_y,
-                                                s.line_height,
-                                                s.font_size,
-                                                &s.words,
-                                                &row_light_val,
-                                                snap.position_ms,
-                                                1.0,
-                                                WrapperTransform::default(),
-                                                -10000.0,
-                                                10000.0,
-                                                1.0,
-                                                horiz_avail_w,
-                                                LineAlign::Center,
-                                                0.0,
-                                                DESKTOP_DROP_SHADOW,
-                                                Some(text_color),
-                                            );
-                                            cur_y += s.line_height;
-                                            if show_trans && !r.translation.trim().is_empty() {
-                                                let row_tfs = (s.font_size * 0.58).clamp(10.5, 26.0);
-                                                let trans_a = (snap.display.trans_current.max(0.75) * dim * line_fade)
-                                                    .clamp(0.0, 1.0);
-                                                paint_horiz_translation(
-                                                    window,
-                                                    &r.translation,
-                                                    win_w,
-                                                    cur_y + 2.0,
-                                                    row_tfs,
-                                                    text_color,
-                                                    trans_a,
-                                                    false,
-                                                    0.0,
-                                                );
-                                                cur_y += 2.0 + row_tfs * 1.18;
-                                            }
-                                            cur_y += gap;
-                                        }
+                                                    }
+                                                }
+                                                let mut cur_y = base_top_y + multi_offset_y;
+                                                let last_k = shaped_multi.len().saturating_sub(1);
+                                                for (k, (idx, r, s)) in shaped_multi.iter().enumerate() {
+                                                    let is_main_active = Some(*idx) == snap.active_row_index && !r.is_bg;
+                                                    let is_active = Some(*idx) == snap.active_row_index
+                                                        || (r.is_bg
+                                                            && snap.position_ms >= r.start_ms
+                                                            && snap.position_ms <= r.end_ms + 300.0);
+                                                    let enter_fade = if shaped_outgoing.is_some() && k == last_k {
+                                                        slide_t.clamp(0.0, 1.0)
+                                                    } else {
+                                                        1.0
+                                                    };
+                                                    let dim = (if is_active {
+                                                        if r.is_bg { 0.84 } else { 1.0 }
+                                                    } else if r.is_bg {
+                                                        0.46
+                                                    } else {
+                                                        0.54
+                                                    }) * enter_fade;
+                                                    let light = row_light(r, snap.position_ms, is_active, false, &snap.display);
+                                                    let progress = paint::line_progress(
+                                                        snap.position_ms,
+                                                        r.start_ms,
+                                                        r.duration_ms(),
+                                                    );
+                                                    let masks: Vec<f32> = s
+                                                        .masks
+                                                        .iter()
+                                                        .map(|frames| position_at(frames, progress))
+                                                        .collect();
+                                                    let row_light_val = RowLight {
+                                                        base: (light.dark * dim).clamp(0.0, 1.0),
+                                                        dark: (light.dark * dim).clamp(0.0, 1.0),
+                                                        bright: (light.bright * dim).clamp(0.0, 1.0),
+                                                        mask: if is_active && light.sweep.is_some() {
+                                                            Some(masks)
+                                                        } else {
+                                                            None
+                                                        },
+                                                        glow: if is_active {
+                                                            light.glow.map(|mut g| {
+                                                                for v in &mut g {
+                                                                    *v *= dim;
+                                                                }
+                                                                g
+                                                            })
+                                                        } else {
+                                                            None
+                                                        },
+                                                    };
+                                                    let natural_w = s
+                                                        .lines
+                                                        .first()
+                                                        .map(|l| f32::from(l.layout.width))
+                                                        .unwrap_or(0.0);
+                                                    let row_overflow = is_main_active && auto_scroll && natural_w > horiz_avail_w;
+                                                    let (rx, rw, ralign) = if row_overflow {
+                                                        (pad_x - horiz_main_scroll, natural_w + 32.0, LineAlign::Left)
+                                                    } else {
+                                                        (origin_x_center, horiz_avail_w, LineAlign::Center)
+                                                    };
+                                                    let draw_row = |window: &mut Window| {
+                                                        paint::paint_row_with_shadow(
+                                                            window,
+                                                            s,
+                                                            rx,
+                                                            cur_y,
+                                                            s.line_height,
+                                                            s.font_size,
+                                                            &s.words,
+                                                            &row_light_val,
+                                                            snap.position_ms,
+                                                            1.0,
+                                                            WrapperTransform::default(),
+                                                            -10000.0,
+                                                            10000.0,
+                                                            1.0,
+                                                            rw,
+                                                            ralign,
+                                                            0.0,
+                                                            DESKTOP_DROP_SHADOW,
+                                                            Some(text_color),
+                                                        );
+                                                    };
+                                                    if row_overflow {
+                                                        window.with_content_mask(
+                                                            Some(ContentMask {
+                                                                bounds: gpui_kit::bounds(
+                                                                    point(px(pad_x), px(horiz_area_top - 4.0)),
+                                                                    gpui_kit::size(px(horiz_avail_w), px(horiz_area_h + 8.0)),
+                                                                ),
+                                                            }),
+                                                            draw_row,
+                                                        );
+                                                    } else {
+                                                        draw_row(window);
+                                                    }
+                                                    cur_y += s.line_height;
+                                                    if show_trans && !r.translation.trim().is_empty() {
+                                                        let row_tfs = (s.font_size * 0.58).clamp(10.5, 26.0);
+                                                        let trans_a = (snap.display.trans_current.max(0.75) * dim)
+                                                            .clamp(0.0, 1.0);
+                                                        paint_horiz_translation(
+                                                            window,
+                                                            &r.translation,
+                                                            win_w,
+                                                            cur_y + 2.0,
+                                                            row_tfs,
+                                                            text_color,
+                                                            trans_a,
+                                                            is_main_active && auto_scroll,
+                                                            if is_main_active { horiz_trans_scroll } else { 0.0 },
+                                                        );
+                                                        cur_y += 2.0 + row_tfs * 1.18;
+                                                    }
+                                                    cur_y += gap;
+                                                }
+                                            },
+                                        );
                                     } else {
                                     let light =
                                         row_light(row, snap.position_ms, true, false, &snap.display);
