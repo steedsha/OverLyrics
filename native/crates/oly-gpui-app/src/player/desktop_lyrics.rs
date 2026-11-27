@@ -425,7 +425,7 @@ pub enum PopoverAction {
 
 #[derive(Default)]
 pub struct SharedDesktopBridge {
-    snapshot: Mutex<DesktopSnapshot>,
+    snapshot: Mutex<Arc<DesktopSnapshot>>,
     commands: Mutex<Vec<DesktopCommand>>,
     cfg: Mutex<DesktopLyricsConfig>,
     popover_actions: Mutex<Vec<PopoverAction>>,
@@ -517,14 +517,11 @@ impl SharedDesktopBridge {
     }
 
     pub(super) fn update_snapshot(&self, snap: DesktopSnapshot) {
-        *self.snapshot.lock().unwrap_or_else(|e| e.into_inner()) = snap;
+        *self.snapshot.lock().unwrap_or_else(|e| e.into_inner()) = Arc::new(snap);
     }
 
-    pub(super) fn read_snapshot(&self) -> DesktopSnapshot {
-        self.snapshot
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+    pub(super) fn read_snapshot(&self) -> Arc<DesktopSnapshot> {
+        Arc::clone(&self.snapshot.lock().unwrap_or_else(|e| e.into_inner()))
     }
 }
 
@@ -775,6 +772,7 @@ pub struct DesktopLyricsView {
     picker_popover: Option<AnyWindowHandle>,
     last_more_anchor: Box4,
     bar_rect: Box4,
+    idle_poll_pending: bool,
 }
 
 impl DesktopLyricsView {
@@ -834,6 +832,7 @@ impl DesktopLyricsView {
             picker_popover: None,
             last_more_anchor: Box4::default(),
             bar_rect: Box4::default(),
+            idle_poll_pending: false,
         }
     }
 
@@ -1831,8 +1830,6 @@ fn paint_horiz_translation(
 
 impl Render for DesktopLyricsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        window.request_animation_frame();
-
         let parent = self.parent.clone();
         window.defer(cx, move |_, cx| {
             let _ = parent.update(cx, |pv, _| {
@@ -2242,12 +2239,14 @@ impl Render for DesktopLyricsView {
         self.buttons = buttons.clone();
 
         let raw_delta = self.press_gesture.delta();
+        let mut btn_animating = false;
         for (btn, rect) in &buttons {
             let idx = btn.index();
             let hovered = self.cursor.is_some_and(|(mx, my)| rect.contains(mx, my));
             let held = self.pressed_btn == Some(*btn);
-            self.btn_feedback[idx].step(hovered, held, dt);
+            btn_animating |= self.btn_feedback[idx].step(hovered, held, dt);
             self.btn_elastic[idx].step(raw_delta, held, dt);
+            btn_animating |= self.btn_elastic[idx].pending();
             let el = &self.btn_elastic[idx];
             let fb = &mut self.btn_feedback[idx];
             fb.pull = el.pull();
@@ -2462,16 +2461,46 @@ impl Render for DesktopLyricsView {
                 .unwrap_or(CursorStyle::Arrow)
         };
 
+        let play_target = if snap.playing { 1.0 } else { 0.0 };
+        let animating = snap.playing
+            || hovering
+            || self.hover_alpha > 0.001
+            || (self.bar_side_blend - target_bar_side).abs() > 0.001
+            || (self.trans_right_blend - target_trans_right).abs() > 0.001
+            || line_fade < 0.999
+            || (self.play_morph.position() - play_target).abs() > 0.002
+            || interlude_snap.is_some()
+            || toast_info.is_some()
+            || btn_animating
+            || !self.configured_hwnd;
+        if animating && window.is_visible() {
+            window.request_animation_frame();
+        } else if !self.idle_poll_pending {
+            self.idle_poll_pending = true;
+            let timer = cx
+                .background_executor()
+                .timer(std::time::Duration::from_millis(120));
+            cx.spawn(async move |view, cx| {
+                timer.await;
+                let _ = view.update(cx, |v, cx| {
+                    v.idle_poll_pending = false;
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
+
         div()
             .size_full()
             .bg(gpui_kit::transparent_black())
             .cursor(active_cursor)
-            .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, _| {
+            .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
                 let (x, y) = (f32::from(ev.position.x), f32::from(ev.position.y));
                 this.cursor = Some((x, y));
                 if this.pressed_btn.is_some() {
                     this.press_gesture.update(x, y);
                 }
+                cx.notify();
             }))
             .on_mouse_down(
                 MouseButton::Left,
@@ -2517,6 +2546,7 @@ impl Render for DesktopLyricsView {
                             });
                         }
                     }
+                    cx.notify();
                 }),
             )
             .on_mouse_up(
@@ -2535,6 +2565,7 @@ impl Render for DesktopLyricsView {
                     } else {
                         this.press_gesture.cancel();
                     }
+                    cx.notify();
                 }),
             )
             .child(
@@ -4861,5 +4892,18 @@ mod tests {
         let (x3, sx3) = snap_axis(505.0, 960.0, 0.0, 1920.0, true);
         assert!(!sx3);
         assert!((x3 - 505.0).abs() < 0.01);
+    }
+
+    #[::std::prelude::v1::test]
+    fn shared_desktop_bridge_read_snapshot_reuses_arc() {
+        let bridge = SharedDesktopBridge::new();
+        let mut snap = DesktopSnapshot::default();
+        snap.track_title = "ZeroCopy".into();
+        bridge.update_snapshot(snap);
+
+        let a = bridge.read_snapshot();
+        let b = bridge.read_snapshot();
+        assert!(Arc::ptr_eq(&a, &b));
+        assert_eq!(a.track_title, "ZeroCopy");
     }
 }
