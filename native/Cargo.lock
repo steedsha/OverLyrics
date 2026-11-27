@@ -5096,6 +5096,7 @@ dependencies = [
  "oly-engine",
  "oly-platform-win",
  "oly-render",
+ "oly-ui",
  "raw-window-handle",
  "serde",
  "serde_json",
@@ -5149,6 +5150,19 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "unicode-segmentation",
+ "windows 0.62.2",
+]
+
+[[package]]
+name = "oly-ui"
+version = "1.1.0"
+dependencies = [
+ "anyhow",
+ "gpui-kit",
+ "log",
+ "oly-core",
+ "oly-render",
+ "raw-window-handle",
  "windows 0.62.2",
 ]
 

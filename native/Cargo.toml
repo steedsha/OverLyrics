@@ -6,6 +6,7 @@ members = [
     "crates/oly-engine",
     "crates/oly-platform-win",
     "crates/oly-render",
+    "crates/oly-ui",
     "crates/oly-gpui-app",
     "crates/oly-qa",
 ]
@@ -39,6 +40,7 @@ oly-core = { path = "crates/oly-core" }
 oly-engine = { path = "crates/oly-engine" }
 oly-platform-win = { path = "crates/oly-platform-win" }
 oly-render = { path = "crates/oly-render" }
+oly-ui = { path = "crates/oly-ui" }
 
 # GPUI test executables otherwise duplicate full dependency PDBs across many
 # feature variants. Keep line tables for our code, omit dependency debug types,
