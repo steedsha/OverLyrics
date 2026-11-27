@@ -57,6 +57,7 @@ pub struct LiveModel {
     last_now: f64,
     song_started_at: f64,
     initial_zero_reanchored: bool,
+    apple_initial_advance_anchored: bool,
 }
 impl LiveModel {
     /// Call after `prepare_control` succeeds, before dispatch, using the same
@@ -265,6 +266,7 @@ impl LiveModel {
             self.clock = TransportClock::new();
             self.song_started_at = now;
             self.initial_zero_reanchored = false;
+            self.apple_initial_advance_anchored = false;
         }
         // Guard against stale SMTC timeline metadata when a new track starts:
         // players frequently keep the previous track's `last_updated_unix_ms`
@@ -298,13 +300,29 @@ impl LiveModel {
                 packet.last_updated_unix_ms = now;
             }
         } else {
+            let is_apple =
+                oly_core::mapping::player_offset_key(Some(packet.app.as_str())) == "apple";
             if packet.position_ms <= 1000.0
                 && packet.last_updated_unix_ms > 0.0
                 && packet.last_updated_unix_ms < effective_start - 1500.0
             {
                 packet.last_updated_unix_ms = effective_start;
             }
-            if packet.position_ms > 250.0 {
+            if is_apple {
+                // Apple Music quantizes SMTC Position to whole seconds while
+                // refreshing LastUpdatedTime every ~100 ms even at pos=0.
+                // Never rewind repeatedly on pos=0; instead anchor once when
+                // pos first advances from 0 to >0 after buffering completes.
+                if !self.apple_initial_advance_anchored && packet.position_ms > 250.0 {
+                    if packet.is_playing()
+                        && (now - effective_start) <= 10_000.0
+                        && self.packet.as_ref().is_some_and(|old| old.position_ms <= 250.0)
+                    {
+                        packet.position_discontinuity = true;
+                    }
+                    self.apple_initial_advance_anchored = true;
+                }
+            } else if packet.position_ms > 250.0 {
                 self.initial_zero_reanchored = true;
             } else if !self.initial_zero_reanchored && (now - effective_start) <= 6000.0 {
                 let incoming_now =
@@ -373,6 +391,7 @@ impl LiveModel {
         self.search_key.clear();
         self.song_started_at = 0.0;
         self.initial_zero_reanchored = false;
+        self.apple_initial_advance_anchored = false;
         self.clock = TransportClock::new();
     }
     pub fn tick(&mut self, now: f64) {
@@ -418,16 +437,17 @@ fn is_qualified_pick(c: &Candidate, track: &Track, threshold: f64) -> bool {
 /// Late collection upgrades when a candidate is strictly higher content tier,
 /// or when an unqualified early pick is superseded by a qualified / much
 /// higher-match candidate in the same tier.
-fn prefer_progressive_pick(
+fn prefer_progressive_pick_with(
     current: Option<Candidate>,
     incoming: Option<Candidate>,
     track: &Track,
     threshold: f64,
+    policy: &oly_engine::picker::SortPolicy,
 ) -> Option<Candidate> {
     match (current, incoming) {
         (Some(current), Some(incoming)) => {
-            let cur_ord = oly_engine::picker::group_order(&current);
-            let inc_ord = oly_engine::picker::group_order(&incoming);
+            let cur_ord = oly_engine::picker::group_order_with(&current, policy.tier_preference);
+            let inc_ord = oly_engine::picker::group_order_with(&incoming, policy.tier_preference);
             if inc_ord < cur_ord {
                 Some(incoming)
             } else if inc_ord > cur_ord {
@@ -438,8 +458,10 @@ fn prefer_progressive_pick(
                 if !cur_ok && inc_ok {
                     Some(incoming)
                 } else if cur_ok == inc_ok
-                    && candidate_percent_value(&incoming).unwrap_or(0.0)
-                        >= candidate_percent_value(&current).unwrap_or(0.0) + 15.0
+                    && (oly_engine::picker::cand_sort_with(&incoming, &current, policy)
+                        == std::cmp::Ordering::Less
+                        || candidate_percent_value(&incoming).unwrap_or(0.0)
+                            >= candidate_percent_value(&current).unwrap_or(0.0) + 15.0)
                 {
                     Some(incoming)
                 } else {
@@ -452,8 +474,25 @@ fn prefer_progressive_pick(
     }
 }
 
+#[allow(dead_code)]
+fn prefer_progressive_pick(
+    current: Option<Candidate>,
+    incoming: Option<Candidate>,
+    track: &Track,
+    threshold: f64,
+) -> Option<Candidate> {
+    prefer_progressive_pick_with(
+        current,
+        incoming,
+        track,
+        threshold,
+        &oly_engine::picker::SortPolicy::default(),
+    )
+}
+
 pub struct SearchAnswer {
     pub selected:Option<(String,String)>,
+    pub failed_pick: Option<(String, String)>,
     pub provider:String,
     pub generation: u64,
     epoch: u64,
@@ -569,8 +608,10 @@ impl SearchWorker {
                     let mut rows = Vec::new();
                     let manual = job.candidate.is_some();
                     let threshold = engine.threshold();
+                    let policy = engine.sort_policy();
                     let mut delivered_pick: Option<Candidate> = None;
                     let mut cached_doc_on_screen = false;
+                    let mut remembered_hit_locked = false;
                     let pick = if let Some(c) = job.candidate {
                         Some(c)
                     } else {
@@ -584,6 +625,7 @@ impl SearchWorker {
                                     actual_pick.id = id.clone();
                                     delivered_pick = Some(actual_pick.clone());
                                     cached_doc_on_screen = true;
+                                    remembered_hit_locked = true;
                                     if engine.epoch() == job.epoch {
                                         *out.lock().unwrap_or_else(|e| e.into_inner()) = Some(SearchAnswer {
                                             generation: job.generation,
@@ -593,6 +635,7 @@ impl SearchWorker {
                                             searching: true,
                                             provider,
                                             selected: Some((source.clone(), id)),
+                                            failed_pick: None,
                                             candidates: vec![actual_pick],
                                             doc: Some(doc),
                                             error: String::new(),
@@ -602,10 +645,16 @@ impl SearchWorker {
                             }
                         }
                         let mut progress = |pool: &[Candidate]| {
-                            if engine.epoch() != job.epoch {
+                            if engine.epoch() != job.epoch || remembered_hit_locked {
                                 return;
                             }
-                            let best_by_tier = oly_engine::arbiter::judge_with_threshold(pool, &job.track, threshold).pick;
+                            let best_by_tier = oly_engine::arbiter::judge_with_policy(
+                                pool,
+                                &job.track,
+                                threshold,
+                                &policy,
+                            )
+                            .pick;
                             let candidate = if let Some((source, old)) = &remembered {
                                 let rem = pool
                                     .iter()
@@ -617,21 +666,10 @@ impl SearchWorker {
                                     })
                                     .cloned();
                                 match (&delivered_pick, rem, best_by_tier) {
-                                    (Some(cur), _, Some(best))
-                                        if oly_engine::picker::group_order(&best)
-                                            < oly_engine::picker::group_order(cur) =>
-                                    {
-                                        Some(best)
-                                    }
-                                    (None, Some(r), Some(best))
-                                        if oly_engine::picker::group_order(&best)
-                                            < oly_engine::picker::group_order(&r) =>
-                                    {
-                                        Some(best)
-                                    }
-                                    (None, Some(r), _) => Some(r),
+                                    // Manual pick always takes highest priority once found.
+                                    (_, Some(r), _) => Some(r),
                                     (None, None, best) => best,
-                                    (Some(_), _, _) => None,
+                                    (Some(_), None, _) => None,
                                 }
                             } else {
                                 best_by_tier
@@ -643,26 +681,27 @@ impl SearchWorker {
                             if !is_remembered_hit && !is_qualified_pick(&candidate, &job.track, threshold) {
                                 return;
                             }
-                            if let Some(cur) = delivered_pick.as_ref() {
-                                let cur_ord = oly_engine::picker::group_order(cur);
-                                let new_ord = oly_engine::picker::group_order(&candidate);
-                                if new_ord > cur_ord {
-                                    return;
-                                }
-                                if new_ord == cur_ord {
-                                    let cur_ok = is_qualified_pick(cur, &job.track, threshold);
-                                    let new_ok = is_qualified_pick(&candidate, &job.track, threshold);
-                                    let much_better = candidate_percent_value(&candidate).unwrap_or(0.0)
-                                        >= candidate_percent_value(cur).unwrap_or(0.0) + 15.0;
-                                    if !((!cur_ok && new_ok) || much_better) {
+                            if !is_remembered_hit {
+                                if let Some(cur) = delivered_pick.as_ref() {
+                                    let cur_ord = oly_engine::picker::group_order_with(cur, policy.tier_preference);
+                                    let new_ord = oly_engine::picker::group_order_with(&candidate, policy.tier_preference);
+                                    if new_ord > cur_ord {
                                         return;
+                                    }
+                                    if new_ord == cur_ord {
+                                        let cur_ok = is_qualified_pick(cur, &job.track, threshold);
+                                        let new_ok = is_qualified_pick(&candidate, &job.track, threshold);
+                                        let higher_priority = oly_engine::picker::cand_sort_with(&candidate, cur, &policy)
+                                            == std::cmp::Ordering::Less;
+                                        let much_better = candidate_percent_value(&candidate).unwrap_or(0.0)
+                                            >= candidate_percent_value(cur).unwrap_or(0.0) + 15.0;
+                                        if !((!cur_ok && new_ok) || (cur_ok == new_ok && (higher_priority || much_better))) {
+                                            return;
+                                        }
                                     }
                                 }
                             }
-                            let auto_picked = remembered.is_none()
-                                || remembered.as_ref().is_some_and(|(s, o)| {
-                                    s != &candidate.source || o.as_ref().is_some_and(|old| old.id != candidate.id)
-                                });
+                            let auto_picked = !is_remembered_hit;
                             let chosen = engine.use_candidate(
                                 transport.as_ref(),
                                 &job.track,
@@ -678,15 +717,31 @@ impl SearchWorker {
                             if let Some(value) = chosen.doc {
                                 let provider = value.get("provider").and_then(|v| v.as_str()).unwrap_or(&candidate.source).to_string();
                                 let id = value.get("id").and_then(|v| v.as_str()).unwrap_or(&candidate.id).to_string();
-                                if let Ok(doc) = serde_json::from_value(value) {
+                                if let Ok(doc) = serde_json::from_value::<oly_contracts::lyrics::LyricDoc>(value) {
+                                    let verified = verified_from_lyric_doc(&doc);
                                     let mut actual_pick = candidate.clone();
                                     actual_pick.id = id.clone();
+                                    actual_pick.verified = Some(verified.clone());
+                                    actual_pick.probe_failed = None;
+                                    actual_pick.probe_timed_out = None;
+                                    actual_pick.probe_error = None;
                                     let mut snap_candidates = pool.to_vec();
-                                    if !snap_candidates.iter().any(|c| c.source == actual_pick.source && c.id == actual_pick.id) {
+                                    if let Some(existing) = snap_candidates
+                                        .iter_mut()
+                                        .find(|c| c.source == actual_pick.source && c.id == actual_pick.id)
+                                    {
+                                        existing.verified = Some(verified);
+                                        existing.probe_failed = None;
+                                        existing.probe_timed_out = None;
+                                        existing.probe_error = None;
+                                    } else {
                                         snap_candidates.push(actual_pick.clone());
                                     }
                                     delivered_pick = Some(actual_pick);
                                     cached_doc_on_screen = false;
+                                    if is_remembered_hit {
+                                        remembered_hit_locked = true;
+                                    }
                                     if engine.epoch() == job.epoch {
                                         *out.lock().unwrap_or_else(|e| e.into_inner()) = Some(SearchAnswer {
                                             generation: job.generation,
@@ -696,6 +751,7 @@ impl SearchWorker {
                                             searching: true,
                                             provider,
                                             selected: Some((candidate.source, id)),
+                                            failed_pick: None,
                                             candidates: snap_candidates,
                                             doc: Some(doc),
                                             error: String::new(),
@@ -709,7 +765,7 @@ impl SearchWorker {
                             continue;
                         }
                         rows = found.list;
-                        let initial_judge = oly_engine::arbiter::judge_with_threshold(&rows, &job.track, threshold);
+                        let initial_judge = oly_engine::arbiter::judge_with_policy(&rows, &job.track, threshold, &policy);
                         let needs_rescue = initial_judge.best_grade < oly_engine::arbiter::GRADE_WORD
                             && (!oly_engine::crosslang::CJK_RE.is_match(&job.track.title)
                                 || !oly_engine::crosslang::CJK_RE.is_match(&raw_artist));
@@ -730,7 +786,7 @@ impl SearchWorker {
                                         rows.push(r);
                                     }
                                 }
-                                rows.sort_by(oly_engine::picker::cand_sort);
+                                rows.sort_by(|a, b| oly_engine::picker::cand_sort_with(a, b, &policy));
                             }
                         }
                         let remembered = engine.remembered_manual_source(&job.track);
@@ -739,34 +795,37 @@ impl SearchWorker {
                                 .find(|c| {
                                     &c.source == source
                                         && old.as_ref().is_none_or(|o| o.id == c.id)
+                                        && c.probe_failed != Some(true)
                                 })
                                 .cloned()
+                                .or_else(|| {
+                                    delivered_pick.as_ref().filter(|d| {
+                                        &d.source == source
+                                            && old.as_ref().is_none_or(|o| o.id == d.id)
+                                    }).cloned()
+                                })
                         });
-                        let judged = oly_engine::arbiter::judge_with_threshold(&rows, &job.track, threshold).pick;
+                        let judged = oly_engine::arbiter::judge_with_policy(&rows, &job.track, threshold, &policy).pick;
+                        // Manual pick always wins over automatic arbitration.
                         match (rem, judged) {
-                            (Some(r), Some(j))
-                                if oly_engine::picker::group_order(&j)
-                                    < oly_engine::picker::group_order(&r) =>
-                            {
-                                Some(j)
-                            }
                             (Some(r), _) => Some(r),
                             (None, j) => j,
                         }
                     };
-                    let pick = if manual {
+                    let pick = if manual || remembered_hit_locked {
                         pick
                     } else {
                         match (&delivered_pick, &pick) {
                             (Some(d), Some(p)) if d.source == p.source && d.id == p.id => Some(d.clone()),
-                            (Some(d), Some(p)) => prefer_progressive_pick(Some(d.clone()), Some(p.clone()), &job.track, threshold),
+                            (Some(d), Some(p)) => prefer_progressive_pick_with(Some(d.clone()), Some(p.clone()), &job.track, threshold, &policy),
                             (None, Some(p)) => Some(p.clone()),
                             (Some(d), None) if cached_doc_on_screen || rows.iter().any(|r| r.source == d.source && r.id == d.id) => Some(d.clone()),
-                            _ => prefer_progressive_pick(None, pick, &job.track, threshold),
+                            _ => prefer_progressive_pick_with(None, pick, &job.track, threshold, &policy),
                         }
                     };
                     let mut provider = String::new();
                     let mut selected = None;
+                    let mut failed_pick = None;
                     let remembered_after = engine.remembered_manual_source(&job.track);
                     let auto_picked = !manual
                         && match (&remembered_after, &pick) {
@@ -811,18 +870,35 @@ impl SearchWorker {
                                     let chosen_id = value.get("id").and_then(|v| v.as_str()).unwrap_or(&c.id).to_string();
                                     selected = Some((c.source.clone(), chosen_id.clone()));
                                     provider = value.get("provider").and_then(|v| v.as_str()).unwrap_or(&c.source).to_string();
-                                    if !rows.iter().any(|r| r.source == c.source && r.id == chosen_id) {
-                                        let mut kept = c.clone();
-                                        kept.id = chosen_id;
-                                        rows.push(kept);
-                                    }
-                                    match serde_json::from_value(value) {
-                                        Ok(doc) => (Some(doc), String::new()),
+                                    match serde_json::from_value::<oly_contracts::lyrics::LyricDoc>(value) {
+                                        Ok(doc) => {
+                                            let verified = verified_from_lyric_doc(&doc);
+                                            if let Some(existing) = rows
+                                                .iter_mut()
+                                                .find(|r| r.source == c.source && r.id == chosen_id)
+                                            {
+                                                existing.verified = Some(verified);
+                                                existing.probe_failed = None;
+                                                existing.probe_timed_out = None;
+                                                existing.probe_error = None;
+                                            } else {
+                                                let mut kept = c.clone();
+                                                kept.id = chosen_id;
+                                                kept.verified = Some(verified);
+                                                kept.probe_failed = None;
+                                                kept.probe_timed_out = None;
+                                                kept.probe_error = None;
+                                                rows.push(kept);
+                                            }
+                                            (Some(doc), String::new())
+                                        }
                                         Err(e) => (None, format!("歌词格式错误：{e}")),
                                     }
                                 }
                                 _ => {
-                                    if let Some(prev) = delivered_pick.as_ref().filter(|_| !manual) {
+                                    if manual {
+                                        failed_pick = Some((c.source.clone(), c.id.clone()));
+                                    } else if let Some(prev) = delivered_pick.as_ref() {
                                         if !rows.iter().any(|r| r.source == prev.source && r.id == prev.id) {
                                             rows.push(prev.clone());
                                         }
@@ -843,6 +919,7 @@ impl SearchWorker {
                             searching: false,
                             provider,
                             selected,
+                            failed_pick,
                             candidates: rows,
                             doc,
                             error,
@@ -857,6 +934,43 @@ impl SearchWorker {
             answer,
         }
     }
+}
+
+fn verified_from_lyric_doc(doc: &oly_contracts::lyrics::LyricDoc) -> oly_engine::types::Verified {
+    if doc.instrumental {
+        return oly_engine::types::Verified {
+            word: Some(false),
+            trans: Some(false),
+            bg: Some(false),
+            lines: Some(1),
+            timeline: Some(true),
+            first_ms: Some(0.0),
+            foreign: Some(false),
+        };
+    }
+    let word = doc
+        .lines
+        .iter()
+        .any(|l| l.words.iter().any(|w| w.start.is_some() && w.end.is_some()));
+    let trans = doc.lines.iter().any(|l| !l.trans.trim().is_empty());
+    let bg = doc
+        .lines
+        .iter()
+        .any(|l| l.bg.is_some() || !l.bg_words.is_empty());
+    let first_ms = doc.lines.first().and_then(|l| l.start).unwrap_or(0) as f64;
+    let texts: Vec<String> = doc.lines.iter().map(|l| l.text.clone()).collect();
+    oly_engine::types::Verified {
+        word: Some(word),
+        trans: Some(trans),
+        bg: Some(bg),
+        lines: Some(doc.lines.len() as i64),
+        timeline: Some(true),
+        first_ms: Some(first_ms),
+        foreign: Some(oly_engine::translate::has_foreign_lyrics(&texts)),
+    }
+}
+
+impl SearchWorker {
     pub fn clear_cache(&self) {
         self.service.clear_search_cache();
     }
@@ -1460,28 +1574,54 @@ mod control_preview_tests {
     }
     #[test]
     fn track_change_clamps_stale_timestamp_and_reanchors_buffering_zero() {
+        // Non-Apple players still re-anchor on post-buffer pos=0 updates.
         let mut m = LiveModel::default();
-        m.feed(packet(true, 5_000.0), 10_000.0);
+        let mut p1 = packet(true, 5_000.0);
+        p1.app = "Spotify.exe".into();
+        m.feed(p1, 10_000.0);
 
         let mut next = packet(true, 115_000.0);
+        next.app = "Spotify.exe".into();
         next.title = "Song B".into();
         next.last_updated_unix_ms = 119_400.0;
         m.feed(next, 120_000.0);
         assert_eq!(m.media_position(120_000.0), 0.0);
 
-        // Even with an intermediate cover refresh packet during buffering,
-        // the real post-buffer start packet re-anchors back to 0.
         let mut cover_tick = packet(true, 0.0);
+        cover_tick.app = "Spotify.exe".into();
         cover_tick.title = "Song B".into();
         cover_tick.last_updated_unix_ms = 120_400.0;
         m.feed(cover_tick, 120_400.0);
 
         let mut buffered = packet(true, 0.0);
+        buffered.app = "Spotify.exe".into();
         buffered.title = "Song B".into();
         buffered.last_updated_unix_ms = 120_650.0;
         m.feed(buffered, 120_650.0);
         assert_eq!(m.media_position(120_650.0), 0.0);
         assert_eq!(m.media_position(121_650.0), 1_000.0);
+
+        // Apple Music clamps stale prev-track pos, ignores pos=0 timestamp churn,
+        // and anchors once when pos first advances from 0 to 1000ms.
+        let mut am = LiveModel::default();
+        am.feed(packet(true, 5_000.0), 10_000.0);
+        let mut am_next = packet(true, 115_000.0);
+        am_next.title = "Song B".into();
+        am_next.last_updated_unix_ms = 119_400.0;
+        am.feed(am_next, 120_000.0);
+        assert_eq!(am.media_position(120_000.0), 0.0);
+
+        let mut am_zero = packet(true, 0.0);
+        am_zero.title = "Song B".into();
+        am_zero.last_updated_unix_ms = 120_650.0;
+        am.feed(am_zero, 120_650.0);
+        assert_eq!(am.media_position(120_650.0), 650.0);
+
+        let mut am_adv = packet(true, 1_000.0);
+        am_adv.title = "Song B".into();
+        am_adv.last_updated_unix_ms = 121_600.0;
+        am.feed(am_adv, 121_650.0);
+        assert_eq!(am.media_position(121_650.0), 1_050.0);
     }
     #[test]
     fn idle_placeholder_titles_and_closed_status_never_request_lyrics() {
@@ -1511,7 +1651,7 @@ mod control_preview_tests {
  assert_eq!(prefer_progressive_pick(Some(candidate("amlldb","word",true,false,false)),Some(candidate("lrclib","trans",false,true,false)),&track,0.72).unwrap().id,"trans");
  assert_eq!(prefer_progressive_pick(Some(candidate("amlldb","trans",false,true,false)),Some(candidate("lrclib","both",true,true,false)),&track,0.72).unwrap().id,"both");
  assert_eq!(prefer_progressive_pick(Some(candidate("qq","both",true,true,false)),Some(candidate("amlldb","both_bg",true,true,true)),&track,0.72).unwrap().id,"both_bg");
- assert_eq!(prefer_progressive_pick(Some(candidate("netease","n",true,true,false)),Some(candidate("qq","q",true,true,false)),&track,0.72).unwrap().id,"n");
+ assert_eq!(prefer_progressive_pick(Some(candidate("netease","n",true,true,false)),Some(candidate("qq","q",true,true,false)),&track,0.72).unwrap().id,"q");
  assert_eq!(prefer_progressive_pick(Some(candidate("qq","first",true,true,false)),Some(candidate("qq","second",true,true,false)),&track,0.72).unwrap().id,"first");
  }
 }

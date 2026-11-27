@@ -171,11 +171,30 @@ pub fn title_ok(cand: &str, want: &str, artist_hint: Option<&str>) -> bool {
     false
 }
 
+fn fold_latin_diacritic(c: char) -> char {
+    match c {
+        'á' | 'à' | 'â' | 'ä' | 'ã' | 'å' | 'ā' | 'ă' | 'ą' => 'a',
+        'é' | 'è' | 'ê' | 'ë' | 'ē' | 'ĕ' | 'ė' | 'ę' | 'ě' => 'e',
+        'í' | 'ì' | 'î' | 'ï' | 'ĩ' | 'ī' | 'ĭ' | 'į' | 'ı' => 'i',
+        'ó' | 'ò' | 'ô' | 'ö' | 'õ' | 'ø' | 'ō' | 'ŏ' | 'ő' => 'o',
+        'ú' | 'ù' | 'û' | 'ü' | 'ũ' | 'ū' | 'ŭ' | 'ů' | 'ű' | 'ų' => 'u',
+        'ñ' | 'ń' | 'ņ' | 'ň' => 'n',
+        'ç' | 'ć' | 'ĉ' | 'ċ' | 'č' => 'c',
+        'ý' | 'ÿ' | 'ŷ' => 'y',
+        'ś' | 'ŝ' | 'ş' | 'š' | 'ß' => 's',
+        'ź' | 'ż' | 'ž' => 'z',
+        'ł' => 'l',
+        'ð' | 'ď' | 'đ' => 'd',
+        _ => c,
+    }
+}
+
 /// Normalisation for artist comparison: punctuation → space (not dropped),
-/// simplify, collapse.
+/// fold Latin diacritics, simplify Chinese, collapse spaces.
 fn norm_artist(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.to_lowercase().chars() {
+        let c = fold_latin_diacritic(c);
         if c.is_alphanumeric() || c.is_whitespace() {
             out.push(c);
         } else {
@@ -186,6 +205,77 @@ fn norm_artist(s: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Common connector/prefix words that must not by themselves prove two
+/// different artists are the same (e.g. "The Weeknd" vs "The Chainsmokers").
+fn is_artist_stopword(token: &str) -> bool {
+    matches!(
+        token,
+        "the"
+            | "and"
+            | "of"
+            | "in"
+            | "on"
+            | "at"
+            | "to"
+            | "for"
+            | "de"
+            | "la"
+            | "le"
+            | "el"
+            | "los"
+            | "las"
+            | "dj"
+            | "mc"
+            | "mr"
+            | "ms"
+            | "dr"
+            | "lil"
+            | "feat"
+            | "ft"
+            | "with"
+            | "vs"
+    )
+}
+
+fn script_flags(s: &str) -> (bool, bool) {
+    let mut has_latin = false;
+    let mut has_non_latin = false;
+    for c in s.chars() {
+        if !c.is_alphabetic() {
+            continue;
+        }
+        let folded = fold_latin_diacritic(c.to_lowercase().next().unwrap_or(c));
+        if folded.is_ascii_alphabetic() {
+            has_latin = true;
+        } else {
+            has_non_latin = true;
+        }
+    }
+    (has_latin, has_non_latin)
+}
+
+/// True when the playing artist and candidate artists are written in different
+/// scripts (e.g. Latin `"Jay Chou"` vs CJK `"周杰伦"`, `"IU"` vs `"아이유"`).
+/// Duration-only artist exemption is restricted to this cross-script case so
+/// two unrelated English (or two unrelated Chinese) artists cannot collide.
+pub fn is_cross_script(want_artist: &str, cand_artists: &[String]) -> bool {
+    let (w_lat, w_non) = script_flags(want_artist);
+    if !w_lat && !w_non {
+        return false;
+    }
+    let mut c_lat = false;
+    let mut c_non = false;
+    for a in cand_artists {
+        let (l, n) = script_flags(a);
+        c_lat |= l;
+        c_non |= n;
+    }
+    if !c_lat && !c_non {
+        return false;
+    }
+    (w_non && !c_non && c_lat) || (c_non && !w_non && w_lat)
 }
 
 /// Split an artist string the way `artistOk` does: whitespace separates tokens
@@ -201,7 +291,7 @@ fn artist_tokens(s: &str) -> Vec<String> {
         .collect()
 }
 
-/// Loose artist match: containment, token overlap, or prefix agreement.
+/// Loose artist match: containment, non-stopword token overlap, or exact match.
 pub fn artist_ok(cand_artists: &[String], want_artist: &str) -> bool {
     let want = norm_artist(want_artist);
     if want.is_empty() {
@@ -213,20 +303,24 @@ pub fn artist_ok(cand_artists: &[String], want_artist: &str) -> bool {
         .filter(|a| !a.is_empty())
         .collect();
     if list.is_empty() {
-        return true;
+        return false;
     }
+    let wt: Vec<String> = artist_tokens(&want)
+        .into_iter()
+        .filter(|t| t.chars().count() >= 2 && !is_artist_stopword(t))
+        .collect();
     list.iter().any(|a| {
         if a.chars().count() == 1 || want.chars().count() == 1 {
             if a == &want {
                 return true;
             }
-        } else if a.contains(&want) || want.contains(a) {
+        } else if a == &want || a.contains(&want) || want.contains(a) {
             return true;
         }
         let at = artist_tokens(a);
-        let wt = artist_tokens(&want);
-        at.iter()
-            .any(|x| x.chars().count() >= 2 && wt.iter().any(|w| w == x))
+        at.iter().any(|x| {
+            x.chars().count() >= 2 && !is_artist_stopword(x) && wt.iter().any(|w| w == x)
+        })
     })
 }
 
@@ -238,18 +332,20 @@ pub fn duration_ok(c: &Candidate, song: &Track) -> bool {
 }
 
 /// Identity guard for automatic source selection: artist agreement, or a tight
-/// duration match when the artist cannot agree (cross-language).
+/// duration match when the artist cannot agree across different scripts.
 pub fn identity_plausible(c: &Candidate, song: &Track) -> bool {
     let artists = c.artist_list().unwrap_or_default();
-    if artist_ok(&artists, &primary_artist(song)) {
+    let want = primary_artist(song);
+    if artist_ok(&artists, &want) {
         return true;
     }
-    duration_ok(c, song)
+    is_cross_script(&want, &artists) && duration_ok(c, song)
 }
 
-/// List-membership gate: title must agree, and either the artist or the
-/// duration must agree. A title mismatch can still pass when the artist is
-/// pinyin-equivalent (≥ medium) *and* the duration is tight.
+/// List-membership gate: title must agree, and either the artist agrees or
+/// (for cross-script names such as Latin vs CJK) the duration is tight.
+/// A title mismatch can still pass when the artist is pinyin-equivalent
+/// (≥ medium) *and* the duration is tight.
 pub fn identity_gate(c: &Candidate, song: &Track) -> bool {
     if c.rescue == Some(true) && c.verified.is_some() {
         return true;
@@ -258,7 +354,7 @@ pub fn identity_gate(c: &Candidate, song: &Track) -> bool {
     let want = primary_artist(song);
     let t_ok = title_ok(&c.title, &song.title, Some(&want));
     let a_ok = artist_ok(&artists, &want);
-    if t_ok && (a_ok || duration_ok(c, song)) {
+    if t_ok && (a_ok || (is_cross_script(&want, &artists) && duration_ok(c, song))) {
         return true;
     }
     if !t_ok {
@@ -294,5 +390,75 @@ mod tests {
     fn one_character_artists_need_exact_equality() {
         assert!(!artist_ok(&["A".to_string()], "Night Tapes"));
         assert!(artist_ok(&["A".to_string()], "A"));
+    }
+
+    #[test]
+    fn stopwords_do_not_match_unrelated_artists_while_diacritics_do() {
+        assert!(!artist_ok(&["The Chainsmokers".into()], "The Weeknd"));
+        assert!(!artist_ok(&["Lil Wayne".into()], "Lil Nas X"));
+        assert!(!artist_ok(&["DJ Khaled".into()], "DJ Snake"));
+        assert!(!artist_ok(&[], "Dua Lipa"));
+        assert!(artist_ok(&["The Weeknd".into()], "The Weeknd"));
+        assert!(artist_ok(&["The Marias".into()], "The Marías"));
+        assert!(artist_ok(&["Renee Rapp".into()], "Reneé Rapp"));
+        assert!(artist_ok(
+            &["Gracie Abrams".into(), "Taylor Swift".into()],
+            "Gracie Abrams"
+        ));
+    }
+
+    #[test]
+    fn identity_gate_rejects_same_script_wrong_artist_even_with_matching_duration() {
+        let song = Track {
+            title: "Wild Horses".into(),
+            artist: Some("Birdy".into()),
+            duration_ms: Some(181_000.0),
+            ..Default::default()
+        };
+        let wrong_artist = Candidate {
+            title: "Wild Horses".into(),
+            artist: Some("The Rolling Stones".into()),
+            duration_sec: Some(181.0),
+            ..Default::default()
+        };
+        let right_artist = Candidate {
+            title: "Wild Horses".into(),
+            artist: Some("Birdy".into()),
+            duration_sec: Some(181.0),
+            ..Default::default()
+        };
+        assert!(!identity_gate(&wrong_artist, &song));
+        assert!(identity_gate(&right_artist, &song));
+    }
+
+    #[test]
+    fn identity_gate_allows_cross_script_artist_with_tight_duration() {
+        let zh_song = Track {
+            title: "Mojito".into(),
+            artist: Some("Jay Chou".into()),
+            duration_ms: Some(185_000.0),
+            ..Default::default()
+        };
+        let zh_cand = Candidate {
+            title: "Mojito".into(),
+            artist: Some("周杰伦".into()),
+            duration_sec: Some(185.0),
+            ..Default::default()
+        };
+        assert!(identity_gate(&zh_cand, &zh_song));
+
+        let kr_song = Track {
+            title: "Love wins all".into(),
+            artist: Some("IU".into()),
+            duration_ms: Some(271_000.0),
+            ..Default::default()
+        };
+        let kr_cand = Candidate {
+            title: "Love wins all".into(),
+            artist: Some("아이유".into()),
+            duration_sec: Some(271.0),
+            ..Default::default()
+        };
+        assert!(identity_gate(&kr_cand, &kr_song));
     }
 }

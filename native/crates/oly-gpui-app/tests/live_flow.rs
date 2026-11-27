@@ -467,3 +467,42 @@ fn motion_worker_disabled_and_cancel_behave_cleanly() {
     assert_eq!(worker.take(), None);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn apple_music_anchors_once_on_first_advance_and_ignores_pos_zero_timestamp_churn() {
+    let mut m = LiveModel::default();
+    let apple = |title: &str, pos: f64, upd: f64| PlayerPacket {
+        title: title.into(),
+        artist: "Birdy".into(),
+        app: "AppleInc.AppleMusicWin_nzyj5cx40ttqa!App".into(),
+        position_ms: pos,
+        duration_ms: 181_000.0,
+        last_updated_unix_ms: upd,
+        status: Some(PlaybackStatus::Code(4)),
+        ..Default::default()
+    };
+    // Track starts at pos=0; Apple Music keeps refreshing LastUpdatedTime every ~100ms
+    // while buffering / before crossing 1000ms.
+    m.feed(apple("Wild Horses", 0.0, 10_000.0), 10_030.0);
+    m.feed(apple("Wild Horses", 0.0, 11_020.0), 11_100.0);
+    // Must NOT have been rewound back to ~80ms by LastUpdatedTime churn.
+    let before_advance = m.media_position(11_100.0);
+    assert!(
+        before_advance > 900.0,
+        "pos=0 timestamp churn must not rewind Apple Music clock, got {before_advance}"
+    );
+    // First real advance 0 -> 1000ms after ~1.8s buffering anchors cleanly once.
+    m.feed(apple("Wild Horses", 1000.0, 11_800.0), 11_850.0);
+    let anchored = m.media_position(11_850.0);
+    assert!(
+        (anchored - 1050.0).abs() < 20.0,
+        "first 0->1000ms advance should anchor cleanly, got {anchored}"
+    );
+    // Subsequent whole-second quantization jitter within ±1000ms stays locked.
+    m.feed(apple("Wild Horses", 2000.0, 13_400.0), 13_500.0);
+    let steady = m.media_position(13_500.0);
+    assert!(
+        (steady - (anchored + 1650.0)).abs() < 20.0,
+        "steady playback after initial anchor must remain locked, got {steady}"
+    );
+}

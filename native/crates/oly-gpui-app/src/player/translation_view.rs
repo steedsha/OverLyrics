@@ -73,6 +73,36 @@ impl PlayerView {
                 }
             }
         }
+        // Defer automatic re-selection for sourceOrder / tierPreference until the
+        // user closes settings or leaves the Sources page, so dragging rows never
+        // thrashes playback; manual selections always retain highest priority.
+        let priority_config = if let Some(live) = self.live.as_ref() {
+            let cfg = live.config.get();
+            json!({
+                "sourceOrder": cfg.pointer("/lyrics/sourceOrder"),
+                "tierPreference": cfg.pointer("/lyrics/tierPreference"),
+            })
+        } else {
+            json!({
+                "sourceOrder": self.settings.config.pointer("/lyrics/sourceOrder"),
+                "tierPreference": self.settings.config.pointer("/lyrics/tierPreference"),
+            })
+        };
+        let on_sources_page = self.settings.open
+            && self.settings.kind == super::settings::SettingsKind::Application
+            && self.settings.page == 3;
+        if self.priority_config.is_none() {
+            self.priority_config = Some(priority_config);
+        } else if !on_sources_page && self.priority_config.as_ref() != Some(&priority_config) {
+            self.priority_config = Some(priority_config);
+            if !search_changed && self.doc_auto_picked && self.doc_provider != "custom" {
+                if let Some(live) = self.live.as_mut() {
+                    if let Some(track) = live.track.clone() {
+                        live.search.request(live.model.generation(), track, None);
+                    }
+                }
+            }
+        }
         let Some(_) = self.doc.as_ref() else {
             self.translation_signature = None;
             if let Some(worker) = self.smart_translation_worker.as_ref() { worker.cancel(); }

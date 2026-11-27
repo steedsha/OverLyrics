@@ -345,6 +345,12 @@ impl LyricsService {
             .unwrap_or(70.0)
     }
 
+    /// Configured source order and tier preference shared with the picker UI.
+    pub fn sort_policy(&self) -> crate::picker::SortPolicy {
+        let cfg = (self.config)();
+        crate::picker::SortPolicy::from_config(&cfg)
+    }
+
     fn enabled_ids(&self) -> Vec<&'static str> {
         let config = (self.config)();
         let enabled = config.pointer("/lyrics/enabledSources");
@@ -492,7 +498,8 @@ impl LyricsService {
         if !self.current(epoch) {
             return SearchResult { cancelled: true, ..Default::default() };
         }
-        list.sort_by(crate::picker::cand_sort);
+        let policy = self.sort_policy();
+        list.sort_by(|a, b| crate::picker::cand_sort_with(a, b, &policy));
         let entry = CacheEntry {
             list: list.clone(),
             at_ms: now_ms(),
@@ -1019,6 +1026,11 @@ impl LyricsService {
                 } else if outcome.timed_out {
                     row.probe_timed_out = Some(true);
                     row.probe_error = outcome.error.clone();
+                } else if outcome.soft {
+                    row.probe_error = outcome
+                        .error
+                        .clone()
+                        .or_else(|| Some("验证未完成".to_string()));
                 }
             }
             if outcome.verified.is_some() {
@@ -1148,6 +1160,7 @@ impl LyricsService {
                 }
                 continue;
             };
+            let verified = verified_from_built_doc(&doc);
             let mut final_doc = compose(&[doc], track, Vec::new(), None);
             let ok = final_doc.get("ok").and_then(Value::as_bool).unwrap_or(false);
             if !ok {
@@ -1160,6 +1173,11 @@ impl LyricsService {
                 object.insert("manual".to_string(), Value::Bool(!auto_pick));
                 object.insert("auto".to_string(), Value::Bool(auto_pick));
             }
+            let mut remembered_cand = attempt.clone();
+            remembered_cand.verified = Some(verified);
+            remembered_cand.probe_failed = None;
+            remembered_cand.probe_timed_out = None;
+            remembered_cand.probe_error = None;
             // Remember *before* any document cache write: the fingerprint of the
             // remembered pick is what tells a later load which cache entry is
             // still the user's choice.
@@ -1167,7 +1185,7 @@ impl LyricsService {
                 let mut memory = Self::lock(&self.source_memory);
                 memory.insert(
                     key.clone(),
-                    MemoryEntry { source: source_id.to_string(), cand: Some(attempt.clone()), at_ms: now_ms(), auto_pick },
+                    MemoryEntry { source: source_id.to_string(), cand: Some(remembered_cand), at_ms: now_ms(), auto_pick },
                 );
                 evict_memory(&mut memory);
             }
@@ -1524,6 +1542,36 @@ fn lyric_cache_key(source_id: &str, candidate: &Candidate) -> Option<String> {
             .to_string()
     };
     serde_json::to_string(&[source_id, candidate.id.as_str(), extra("file").as_str(), extra("mid").as_str(), extra("id").as_str()]).ok()
+}
+
+fn verified_from_built_doc(doc: &crate::types::BuiltDoc) -> Verified {
+    if doc.instrumental {
+        return Verified {
+            word: Some(false),
+            trans: Some(false),
+            bg: Some(false),
+            lines: Some(1),
+            timeline: Some(true),
+            first_ms: Some(0.0),
+            foreign: Some(false),
+        };
+    }
+    let first_ms = doc.lines.first().map(|line| line.start as f64).unwrap_or(0.0);
+    let has_bg = doc.has_background
+        || doc.lines.iter().any(|l| {
+            l.bg.is_some() || l.bg_words.as_ref().is_some_and(|w| !w.is_empty())
+        });
+    Verified {
+        word: Some(doc.has_word_level),
+        trans: Some(doc.has_translation),
+        bg: Some(has_bg),
+        lines: Some(doc.lines.len() as i64),
+        timeline: Some(true),
+        first_ms: Some(first_ms),
+        foreign: Some(has_foreign_lyrics(
+            &doc.lines.iter().map(|l| l.text.clone()).collect::<Vec<_>>(),
+        )),
+    }
 }
 
 fn raw_lyrics(result: &ProviderResult) -> RawLyrics {

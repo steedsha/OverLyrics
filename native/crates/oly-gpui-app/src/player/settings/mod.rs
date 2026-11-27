@@ -53,6 +53,7 @@ pub struct Settings {
     pub status_alpha: f32,
     status_at_ms: Option<f64>,
     last_status: String,
+    pub source_drag: Option<usize>,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -103,6 +104,7 @@ impl Default for Settings {
             status_alpha: 0.0,
             status_at_ms: None,
             last_status: String::new(),
+            source_drag: None,
         }
     }
 }
@@ -183,6 +185,12 @@ impl Settings {
             }
         }
         if self.kind == SettingsKind::Application && page == 3 {
+            let source_rows: Vec<Item> = self
+                .source_order()
+                .iter()
+                .filter_map(|id| Self::source_item_for(id))
+                .collect();
+            rows.splice(0..0, source_rows);
             let aliases = self.artist_aliases();
             if !aliases.is_empty() {
                 let insert_at = rows.len().saturating_sub(1);
@@ -239,6 +247,35 @@ impl Settings {
             }
         }
         rows
+    }
+    pub fn source_order(&self) -> Vec<String> {
+        oly_engine::picker::SortPolicy::from_config(&self.config).source_order
+    }
+    pub fn move_source_order(&mut self, from: usize, to: usize, now: f64) -> bool {
+        let mut order = self.source_order();
+        if from >= order.len() || to >= order.len() || from == to {
+            return false;
+        }
+        let item = order.remove(from);
+        order.insert(to, item);
+        let val = Value::Array(order.into_iter().map(Value::String).collect());
+        self.set("lyrics.sourceOrder", val, now, true);
+        true
+    }
+    fn source_item_for(id: &str) -> Option<Item> {
+        match id {
+            "amlldb" => Some(toggle("lyrics.enabledSources.amlldb", "AMLL 歌词库")),
+            "qq" => Some(toggle("lyrics.enabledSources.qq", "QQ 音乐")),
+            "kugou" => Some(toggle("lyrics.enabledSources.kugou", "酷狗音乐")),
+            "netease" => Some(toggle("lyrics.enabledSources.netease", "网易云音乐")),
+            "lrclib" => Some(toggle("lyrics.enabledSources.lrclib", "LRCLIB")),
+            _ => None,
+        }
+    }
+    pub fn source_switch_track(row: Box4) -> Box4 {
+        let mut track = crate::player::details::switch_track(row);
+        track.x -= 26.0;
+        track
     }
     pub fn saved_player_offsets(&self) -> Vec<String> {
         let mut out: Vec<String> = self
@@ -1300,10 +1337,18 @@ impl Settings {
         let mut y = c.y - scroll;
         let items = self.items_on(page);
         let mut out = Vec::with_capacity(items.len());
+        let mut has_sources_header = false;
         let mut has_sync_header = false;
         let mut has_alias_header = false;
         for (i, item) in items.into_iter().enumerate() {
-            let header = if matches!(item.key, "lyrics.playerSyncOffsets.apple")
+            let header = if item.key.starts_with("lyrics.enabledSources.") {
+                if !has_sources_header {
+                    has_sources_header = true;
+                    Some("在线歌词源")
+                } else {
+                    None
+                }
+            } else if matches!(item.key, "lyrics.playerSyncOffsets.apple")
                 || item.key == ACTIVE_PLAYER_OFFSET_KEY
                 || item.key == CUSTOM_PLAYER_OFFSET_KEY
             {

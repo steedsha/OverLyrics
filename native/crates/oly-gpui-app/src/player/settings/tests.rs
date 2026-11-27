@@ -169,7 +169,11 @@ mod separation_tests {
         assert_eq!(settings.items()[1].key, "uiAccentColor");
         assert_eq!(settings.items().last().map(|i| i.key), Some("cornerRadius"));
         settings.page = 3;
-        assert_eq!(settings.items()[0].key, "lyrics.enabledSources.kugou");
+        assert_eq!(settings.items()[0].key, "lyrics.enabledSources.amlldb");
+        assert!(settings.move_source_order(0, 2, 0.0));
+        assert_eq!(settings.source_order()[0], "qq");
+        assert_eq!(settings.source_order()[2], "amlldb");
+        assert!(settings.items().iter().any(|i| i.key == "lyrics.tierPreference"));
         settings.page = 4;
         settings.set("lyrics.translateEngine", json!("ai"), 0., false);
         assert!(settings.items().iter().any(|i| i.key == "lyrics.aiModel"));

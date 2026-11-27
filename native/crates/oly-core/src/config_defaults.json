@@ -217,6 +217,14 @@
       "lrclib": true,
       "amlldb": true
     },
+    "sourceOrder": [
+      "amlldb",
+      "qq",
+      "kugou",
+      "netease",
+      "lrclib"
+    ],
+    "tierPreference": "trans",
     "sourcesPruned": 3,
     "matchThreshold": 70,
     "lyricsCacheMB": 50,

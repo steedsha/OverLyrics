@@ -15,17 +15,123 @@ use std::cmp::Ordering;
 
 use crate::types::Candidate;
 
-/// Visibility groups, best first:
-/// `逐字+翻译+和声 > 逐字+翻译 > 逐行+翻译 > 逐字 > 逐行 > 原文`.
-pub fn group_order(c: &Candidate) -> u8 {
+/// Default source priority order (index 0 = highest): AMLL > QQ > Kugou > Netease > LRCLIB.
+pub const DEFAULT_SOURCE_ORDER: [&str; 5] = ["amlldb", "qq", "kugou", "netease", "lrclib"];
+
+/// Preference when comparing single-badge tiers (`逐行+译文` vs `仅逐字`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TierPreference {
+    #[default]
+    TransFirst,
+    WordFirst,
+}
+
+impl TierPreference {
+    pub fn from_str_opt(value: Option<&str>) -> Self {
+        match value {
+            Some("word") => Self::WordFirst,
+            _ => Self::TransFirst,
+        }
+    }
+}
+
+/// Complete ordering policy shared by the picker list and automatic selection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SortPolicy {
+    pub source_order: Vec<String>,
+    pub tier_preference: TierPreference,
+}
+
+impl Default for SortPolicy {
+    fn default() -> Self {
+        Self {
+            source_order: DEFAULT_SOURCE_ORDER.iter().map(|s| (*s).to_string()).collect(),
+            tier_preference: TierPreference::TransFirst,
+        }
+    }
+}
+
+impl SortPolicy {
+    /// Normalize a configured source order so every known source appears once.
+    pub fn normalize_source_order(raw: &[String]) -> Vec<String> {
+        let mut out = Vec::with_capacity(DEFAULT_SOURCE_ORDER.len());
+        for id in raw {
+            let norm = canonical_source_id(id);
+            if DEFAULT_SOURCE_ORDER.contains(&norm) && !out.iter().any(|s: &String| s == norm) {
+                out.push(norm.to_string());
+            }
+        }
+        for id in DEFAULT_SOURCE_ORDER {
+            if !out.iter().any(|s| s == id) {
+                out.push(id.to_string());
+            }
+        }
+        out
+    }
+
+    pub fn from_config(config: &serde_json::Value) -> Self {
+        let raw_order: Vec<String> = config
+            .pointer("/lyrics/sourceOrder")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let source_order = Self::normalize_source_order(&raw_order);
+        let tier_preference = TierPreference::from_str_opt(
+            config.pointer("/lyrics/tierPreference").and_then(|v| v.as_str()),
+        );
+        Self {
+            source_order,
+            tier_preference,
+        }
+    }
+}
+
+fn canonical_source_id(id: &str) -> &str {
+    match id {
+        "amlldb" | "amllb" | "amll" => "amlldb",
+        "qq" => "qq",
+        "kugou" => "kugou",
+        "netease" => "netease",
+        "lrclib" => "lrclib",
+        other => other,
+    }
+}
+
+/// True when the candidate has been verified to carry a usable timeline with at
+/// least one line (not merely static source capability hints).
+pub fn is_verified_usable(c: &Candidate) -> bool {
+    c.probe_failed != Some(true)
+        && c.verified
+            .as_ref()
+            .is_some_and(|v| v.timeline == Some(true) && v.lines.unwrap_or(0) > 0)
+}
+
+/// Visibility groups, best first, parameterized by `TierPreference`.
+pub fn group_order_with(c: &Candidate, pref: TierPreference) -> u8 {
     match kind_of(c) {
         "both_bg" => 0,
         "both" => 1,
-        "trans" => 2,
-        "word" => 3,
+        "trans" => match pref {
+            TierPreference::TransFirst => 2,
+            TierPreference::WordFirst => 3,
+        },
+        "word" => match pref {
+            TierPreference::TransFirst => 3,
+            TierPreference::WordFirst => 2,
+        },
         "line" => 4,
         _ => 5,
     }
+}
+
+/// Visibility groups, best first:
+/// `逐字+翻译+和声 > 逐字+翻译 > 逐行+翻译 > 逐字 > 逐行 > 原文`.
+pub fn group_order(c: &Candidate) -> u8 {
+    group_order_with(c, TierPreference::TransFirst)
 }
 
 /// Human label for a candidate's group.
@@ -75,19 +181,15 @@ pub fn kind_of(c: &Candidate) -> &'static str {
     }
 }
 
-fn src_privilege(c: &Candidate) -> u8 {
+fn source_rank_with(c: &Candidate, order: &[String]) -> usize {
     if c.fused == Some(true) {
-        return 0;
+        return usize::MAX;
     }
-    match c.source.as_str() {
-        // Source priority within the same content tier: AMLL > QQ > Kugou > Netease > LRCLIB.
-        "amlldb" | "amllb" | "amll" => 5,
-        "qq" => 4,
-        "kugou" => 3,
-        "netease" => 2,
-        "lrclib" => 1,
-        _ => 0,
-    }
+    let canonical = canonical_source_id(c.source.as_str());
+    order
+        .iter()
+        .position(|s| canonical_source_id(s.as_str()) == canonical)
+        .unwrap_or(usize::MAX - 1)
 }
 
 /// Same-submission signature: identical title and identical artist set.
@@ -119,18 +221,35 @@ fn cmp_f64(a: f64, b: f64) -> Ordering {
     a.partial_cmp(&b).unwrap_or(Ordering::Equal)
 }
 
-/// The one ordering function. Used by the picker panel and by automatic
-/// selection alike.
-pub fn cand_sort(a: &Candidate, b: &Candidate) -> Ordering {
-    let ga = group_order(a);
-    let gb = group_order(b);
+fn availability_tier(c: &Candidate) -> u8 {
+    if is_verified_usable(c) {
+        0
+    } else if c.probe_failed == Some(true)
+        || c.verified.as_ref().is_some_and(|v| v.lines == Some(0))
+    {
+        2
+    } else {
+        1
+    }
+}
+
+/// Policy-aware ordering function shared by the picker panel and automatic
+/// source selection: verified availability > badge tier > source order > score.
+pub fn cand_sort_with(a: &Candidate, b: &Candidate, policy: &SortPolicy) -> Ordering {
+    let aa = availability_tier(a);
+    let ab = availability_tier(b);
+    if aa != ab {
+        return aa.cmp(&ab);
+    }
+    let ga = group_order_with(a, policy.tier_preference);
+    let gb = group_order_with(b, policy.tier_preference);
     if ga != gb {
         return ga.cmp(&gb);
     }
-    let sa = src_privilege(a);
-    let sb = src_privilege(b);
+    let sa = source_rank_with(a, &policy.source_order);
+    let sb = source_rank_with(b, &policy.source_order);
     if sa != sb {
-        return sb.cmp(&sa);
+        return sa.cmp(&sb);
     }
     // Two submissions of the same song: percent is metadata noise (a different
     // album suffix alone moves it ten points), so the earlier first line wins —
@@ -143,6 +262,12 @@ pub fn cand_sort(a: &Candidate, b: &Candidate) -> Ordering {
         return p;
     }
     cmp_f64(first_ms(a), first_ms(b))
+}
+
+/// The one ordering function. Used by the picker panel and by automatic
+/// selection alike.
+pub fn cand_sort(a: &Candidate, b: &Candidate) -> Ordering {
+    cand_sort_with(a, b, &SortPolicy::default())
 }
 
 /// Whether a candidate may appear in the list at all: a failed probe, or a

@@ -9,7 +9,7 @@
 //! Goldens: `native/tests/oracle/engine/arbiter.json` and `arbiter-tables.json`.
 
 use crate::identity::identity_gate;
-use crate::picker::{cand_sort, kind_of};
+use crate::picker::{SortPolicy, TierPreference, cand_sort_with, kind_of};
 use crate::types::{BuiltDoc, Candidate, Track};
 
 /// Quality rungs, higher is better, strictly aligned with `picker::group_order`.
@@ -20,16 +20,27 @@ pub const GRADE_WORD: u8 = 3;
 pub const GRADE_LINE: u8 = 2;
 pub const GRADE_PLAIN: u8 = 1;
 
-/// What a candidate can actually deliver.
-pub fn grade_of(c: &Candidate) -> u8 {
+/// What a candidate can actually deliver, respecting `TierPreference`.
+pub fn grade_of_with(c: &Candidate, pref: TierPreference) -> u8 {
     match kind_of(c) {
         "both_bg" => GRADE_BOTH_BG,
         "both" => GRADE_BOTH,
-        "trans" => GRADE_TRANS,
-        "word" => GRADE_WORD,
+        "trans" => match pref {
+            TierPreference::TransFirst => GRADE_TRANS,
+            TierPreference::WordFirst => GRADE_WORD,
+        },
+        "word" => match pref {
+            TierPreference::TransFirst => GRADE_WORD,
+            TierPreference::WordFirst => GRADE_TRANS,
+        },
         "line" => GRADE_LINE,
         _ => GRADE_PLAIN,
     }
+}
+
+/// What a candidate can actually deliver.
+pub fn grade_of(c: &Candidate) -> u8 {
+    grade_of_with(c, TierPreference::TransFirst)
 }
 
 /// The rung of an already-delivered document (rescue products and cached docs
@@ -89,17 +100,32 @@ fn candidate_duration_ms(c: &Candidate) -> Option<f64> {
 /// `build_cands` only filters the panel, and passing its output here would hide
 /// the LRCLIB row-level document forever.
 pub fn judge(cands: &[Candidate], song: &Track) -> Judgement {
-    judge_impl(cands, song, None)
+    judge_impl(cands, song, None, &SortPolicy::default())
 }
 
 /// Arbitrate using the panel's visibility threshold and same-song duration guard
 /// so automatic selection picks the same candidate shown at the top of the list
 /// whenever any verified candidate qualifies.
 pub fn judge_with_threshold(cands: &[Candidate], song: &Track, threshold: f64) -> Judgement {
-    judge_impl(cands, song, Some(threshold))
+    judge_impl(cands, song, Some(threshold), &SortPolicy::default())
 }
 
-fn judge_impl(cands: &[Candidate], song: &Track, threshold: Option<f64>) -> Judgement {
+/// Arbitrate using the configured `SortPolicy` (source order + tier preference).
+pub fn judge_with_policy(
+    cands: &[Candidate],
+    song: &Track,
+    threshold: f64,
+    policy: &SortPolicy,
+) -> Judgement {
+    judge_impl(cands, song, Some(threshold), policy)
+}
+
+fn judge_impl(
+    cands: &[Candidate],
+    song: &Track,
+    threshold: Option<f64>,
+    policy: &SortPolicy,
+) -> Judgement {
     let mut alive: Vec<Candidate> = cands
         .iter()
         .filter(|c| {
@@ -140,9 +166,12 @@ fn judge_impl(cands: &[Candidate], song: &Track, threshold: Option<f64>) -> Judg
         }
     }
 
-    alive.sort_by(cand_sort);
+    alive.sort_by(|a, b| cand_sort_with(a, b, policy));
     let pick = alive.first().cloned();
-    let best_grade = pick.as_ref().map(grade_of).unwrap_or(0);
+    let best_grade = pick
+        .as_ref()
+        .map(|c| grade_of_with(c, policy.tier_preference))
+        .unwrap_or(0);
     Judgement {
         ranked: alive,
         pick,

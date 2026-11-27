@@ -218,11 +218,11 @@ pub(super) fn application_items(page: usize) -> Vec<Item> {
             slider("edgeFeather", "上下羽化", 0., 160., 2.),
         ],
         3 => vec![
-            toggle("lyrics.enabledSources.kugou", "酷狗音乐"),
-            toggle("lyrics.enabledSources.netease", "网易云音乐"),
-            toggle("lyrics.enabledSources.qq", "QQ 音乐"),
-            toggle("lyrics.enabledSources.lrclib", "LRCLIB"),
-            toggle("lyrics.enabledSources.amlldb", "AMLL 歌词库"),
+            segmented(
+                "lyrics.tierPreference",
+                "版本偏好",
+                &[("trans", "译文优先"), ("word", "逐字优先")],
+            ),
             slider("lyrics.matchThreshold", "歌词匹配阈值", 0., 100., 1.),
             slider("lyrics.lyricsCacheMB", "本地歌词缓存上限", 10., 500., 10.),
             action("lyrics.addArtistAlias", "添加歌手名映射", "+ 添加", false),

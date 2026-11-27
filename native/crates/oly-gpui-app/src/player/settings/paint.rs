@@ -102,6 +102,7 @@ pub struct Presentation {
     pub theme_mode: crate::player::model::ThemeMode,
     pub status_alpha: f32,
     pub reset_armed: bool,
+    pub dragging_source_row: Option<usize>,
 }
 impl Settings {
     pub fn presentation(&self, rect: Box4) -> Presentation {
@@ -269,6 +270,7 @@ impl Settings {
             reset_armed: self
                 .reset_confirm_until_ms
                 .is_some_and(|t| self.last_tick_ms.unwrap_or(0.0) <= t),
+            dragging_source_row: self.source_drag,
         }
     }
 }
@@ -723,10 +725,18 @@ fn paint_page_rows(
     use crate::player::chrome;
     let color = |a| chrome::text(a * opacity);
     let mut section_starts: Vec<usize> = Vec::new();
+    let mut has_sources = false;
     let mut has_sync = false;
     let mut has_alias = false;
     for (idx, (_, item, _)) in rows.iter().enumerate() {
-        let label = if matches!(item.key, "lyrics.playerSyncOffsets.apple")
+        let label = if item.key.starts_with("lyrics.enabledSources.") {
+            if !has_sources {
+                has_sources = true;
+                Some("在线歌词源")
+            } else {
+                None
+            }
+        } else if matches!(item.key, "lyrics.playerSyncOffsets.apple")
             || item.key == ACTIVE_PLAYER_OFFSET_KEY
             || item.key == CUSTOM_PLAYER_OFFSET_KEY
         {
@@ -757,7 +767,9 @@ fn paint_page_rows(
         let end = section_starts.get(g_idx + 1).copied().unwrap_or(rows.len());
         let (_, first_item, first) = &rows[start];
         let (_, _, last) = &rows[end - 1];
-        let header = if first_item.key == ACTIVE_PLAYER_OFFSET_KEY || first_item.key == CUSTOM_PLAYER_OFFSET_KEY {
+        let header = if first_item.key.starts_with("lyrics.enabledSources.") {
+            Some("在线歌词源")
+        } else if first_item.key == ACTIVE_PLAYER_OFFSET_KEY || first_item.key == CUSTOM_PLAYER_OFFSET_KEY {
             Some("播放器同步")
         } else if matches!(first_item.key, "lyrics.artistAliases" | "lyrics.addArtistAlias") {
             Some("歌手名映射")
@@ -947,7 +959,34 @@ fn paint_page_rows(
                 }
             }
             Control::Switch => {
-                let track = crate::player::details::switch_track(row);
+                let is_source_row = item.key.starts_with("lyrics.enabledSources.");
+                let is_dragging = is_source_row && p.dragging_source_row == Some(*i);
+                if is_dragging {
+                    chrome::fill_round(
+                        window,
+                        row.x + 2.0,
+                        row.y + 1.0,
+                        row.w - 4.0,
+                        row.h - 2.0,
+                        9.0,
+                        color(0.11),
+                    );
+                    chrome::stroke_round(
+                        window,
+                        row.x + 2.0,
+                        row.y + 1.0,
+                        row.w - 4.0,
+                        row.h - 2.0,
+                        9.0,
+                        0.75,
+                        color(0.22),
+                    );
+                }
+                let track = if is_source_row {
+                    Settings::source_switch_track(row)
+                } else {
+                    crate::player::details::switch_track(row)
+                };
                 let label_w = (track.x - row.x - 16.).max(40.);
                 chrome::paint_text_fitted_vcentred(
                     window,
@@ -957,7 +996,7 @@ fn paint_page_rows(
                     label_w,
                     12.5,
                     500.,
-                    color(0.84),
+                    color(if is_dragging { 0.96 } else { 0.84 }),
                 );
                 let on = value.as_bool().unwrap_or(false);
                 let frac = p
@@ -978,6 +1017,14 @@ fn paint_page_rows(
                     p.accent_hex,
                     opacity,
                 );
+                if is_source_row {
+                    let gx = row.right() - 21.0;
+                    let cy = row.centre().1;
+                    let grip_color = color(if is_dragging { 0.85 } else { 0.38 });
+                    for dy_bar in [-4.5f32, 0.0, 4.5] {
+                        chrome::fill_round(window, gx, cy + dy_bar - 0.75, 13.0, 1.5, 0.75, grip_color);
+                    }
+                }
             }
             Control::Text { secret } => {
                 let field = Settings::choice_pill_rect(row);

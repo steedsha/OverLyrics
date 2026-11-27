@@ -36,32 +36,61 @@ fn row_unusable(candidate: &Candidate) -> bool {
 }
 
 /// Selected identity is (source, id), never the filtered row position.
-/// Filtered rows share `oly_engine::picker::cand_sort` so the panel top item
-/// always matches automatic selection.
+/// Filtered rows share `oly_engine::picker::cand_sort_with` so the panel top
+/// item always matches automatic selection.
+///
+/// Scheme A visibility:
+/// - Verified usable rows always sort ahead of unverified/pending rows.
+/// - When a source already has at least one verified usable candidate, drop
+///   unprobed secondary entries (`verified.is_none()`) from that same source
+///   unless currently selected.
+/// - When a source has no verified usable candidate, keep at most one
+///   unverified/timed-out/soft-failed placeholder row for that source (sunk
+///   below verified candidates).
 pub fn version_rows(
     candidates: &[Candidate],
     config: &Value,
     selected: Option<(&str, &str)>,
 ) -> Vec<VersionRow> {
     let threshold = match_threshold(config);
-    let mut visible: Vec<(usize, &Candidate, f64)> = candidates
+    let policy = oly_engine::picker::SortPolicy::from_config(config);
+    let mut visible: Vec<(usize, &Candidate, f64, bool)> = candidates
         .iter()
         .enumerate()
         .filter_map(|(candidate_index, candidate)| {
             let is_selected =
                 selected.is_some_and(|(source, id)| source == candidate.source && id == candidate.id);
             let percent = candidate_percent(candidate).or_else(|| is_selected.then_some(0.0))?;
-            (percent >= threshold || is_selected).then_some((candidate_index, candidate, percent))
+            (percent >= threshold || is_selected)
+                .then_some((candidate_index, candidate, percent, is_selected))
         })
         .collect();
     visible.sort_by(|a, b| {
         row_unusable(a.1)
             .cmp(&row_unusable(b.1))
-            .then_with(|| oly_engine::picker::cand_sort(a.1, b.1))
+            .then_with(|| oly_engine::picker::cand_sort_with(a.1, b.1, &policy))
     });
+
+    let mut verified_sources = std::collections::HashSet::new();
+    for (_, cand, _, _) in &visible {
+        if oly_engine::picker::is_verified_usable(cand) {
+            verified_sources.insert(cand.source.as_str());
+        }
+    }
+    let mut unverified_placeholder_kept = std::collections::HashSet::new();
+    visible.retain(|(_, cand, _, is_selected)| {
+        if *is_selected || cand.verified.is_some() {
+            return true;
+        }
+        if verified_sources.contains(cand.source.as_str()) {
+            return false;
+        }
+        unverified_placeholder_kept.insert(cand.source.as_str())
+    });
+
     visible
         .into_iter()
-        .map(|(candidate_index, candidate, percent)| {
+        .map(|(candidate_index, candidate, percent, is_selected)| {
             let title = source_name(candidate);
             let artist = candidate.artist_text();
             let pct = if (percent - percent.round()).abs() < 0.05 {
@@ -91,7 +120,7 @@ pub fn version_rows(
                 timing_badge,
                 has_translation,
                 candidate_index,
-                selected: selected.is_some_and(|(source, id)| source == candidate.source && id == candidate.id),
+                selected: is_selected,
             }
         })
         .collect()
@@ -148,7 +177,7 @@ mod tests {
 
     #[test]
     fn threshold_is_inclusive_and_unknown_is_never_zero() {
-        let candidates = vec![candidate("qq", "below", Some(69.999)), candidate("qq", "edge", Some(70.0)), candidate("qq", "above", Some(70.001)), candidate("qq", "unknown", None)];
+        let candidates = vec![candidate("qq", "below", Some(69.999)), candidate("qq", "edge", Some(70.0)), candidate("kugou", "above", Some(70.001)), candidate("qq", "unknown", None)];
         let rows = version_rows(&candidates, &json!({"lyrics":{"matchThreshold":70}}), None);
         assert_eq!(rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), vec!["edge", "above"]);
         assert!(version_rows(&[candidate("qq", "unknown", None)], &json!({"lyrics":{"matchThreshold":0}}), None).is_empty());
@@ -277,5 +306,62 @@ mod tests {
         );
         assert!(rows.iter().any(|r| r.source == "amlldb" && r.id == "starboy-amll" && r.selected));
         assert!(rows.iter().any(|r| r.source == "qq" && r.id == "starboy-qq" && !r.selected));
+    }
+
+    #[test]
+    fn scheme_a_sinks_unverified_and_respects_source_order_and_tier_preference() {
+        let mut qq_unverified = candidate("qq", "qq-u", Some(90.0));
+        qq_unverified.cap_word = Some(true);
+        qq_unverified.cap_trans = Some(true);
+        qq_unverified.probe_error = Some("soft fail".into());
+
+        let mut qq_unverified_2 = candidate("qq", "qq-u2", Some(90.0));
+        qq_unverified_2.cap_word = Some(true);
+        qq_unverified_2.cap_trans = Some(true);
+
+        let mut netease_trans = candidate("netease", "ne-1", Some(90.0));
+        netease_trans.verified = Some(Verified {
+            timeline: Some(true),
+            word: Some(false),
+            trans: Some(true),
+            lines: Some(24),
+            ..Default::default()
+        });
+
+        let mut kugou_word = candidate("kugou", "kg-1", Some(90.0));
+        kugou_word.verified = Some(Verified {
+            timeline: Some(true),
+            word: Some(true),
+            trans: Some(false),
+            lines: Some(55),
+            ..Default::default()
+        });
+
+        let cfg_trans = json!({"lyrics": {"matchThreshold": 70, "tierPreference": "trans"}});
+        let rows = version_rows(
+            &[qq_unverified.clone(), qq_unverified_2.clone(), netease_trans.clone(), kugou_word.clone()],
+            &cfg_trans,
+            None,
+        );
+        let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, vec!["ne-1", "kg-1", "qq-u"]);
+
+        let cfg_word = json!({"lyrics": {"matchThreshold": 70, "tierPreference": "word"}});
+        let rows_word = version_rows(
+            &[qq_unverified, qq_unverified_2, netease_trans, kugou_word],
+            &cfg_word,
+            None,
+        );
+        let ids_word: Vec<&str> = rows_word.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids_word, vec!["kg-1", "ne-1", "qq-u"]);
+
+        let mut qq_both = candidate("qq", "qq-v", Some(90.0));
+        qq_both.verified = Some(Verified { timeline: Some(true), word: Some(true), trans: Some(true), lines: Some(50), ..Default::default() });
+        let mut kg_both = candidate("kugou", "kg-v", Some(90.0));
+        kg_both.verified = Some(Verified { timeline: Some(true), word: Some(true), trans: Some(true), lines: Some(50), ..Default::default() });
+        let cfg_order = json!({"lyrics": {"matchThreshold": 70, "sourceOrder": ["kugou", "qq", "amlldb", "netease", "lrclib"]}});
+        let rows_order = version_rows(&[qq_both, kg_both], &cfg_order, None);
+        assert_eq!(rows_order[0].source, "kugou");
+        assert_eq!(rows_order[1].source, "qq");
     }
 }

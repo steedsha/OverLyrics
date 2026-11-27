@@ -460,6 +460,7 @@ impl PlayerView {
             || self.drag_thumb.is_some()
             || self.switch_drag.is_some()
             || self.inline_switch_drag.is_some()
+            || self.source_reorder_drag.is_some()
             || self.segmented_drag.is_some()
     }
 
@@ -638,10 +639,20 @@ impl PlayerView {
         }
         if let Some(Hot::SettingChoice(index))=hit {
             if let Some((_,item,row))=self.panel_bounds.last().and_then(|r|self.settings.rows(*r).into_iter().find(|(i,_,_)|*i==index as usize)) {
-                let track=crate::player::details::switch_track(row);
+                let is_source_row = item.key.starts_with("lyrics.enabledSources.");
+                let track = if is_source_row {
+                    Settings::source_switch_track(row)
+                } else {
+                    crate::player::details::switch_track(row)
+                };
                 if matches!(item.control,Control::Switch) && track.contains(x,y){
                     let fraction=if self.settings.value(item.key).as_bool().unwrap_or(false){1.}else{0.};
                     self.switch_drag=Some(crate::player::details::SwitchDrag{index:index as usize,track,origin:x,fraction,moved:false});return;
+                }
+                if is_source_row && matches!(item.control, Control::Switch) {
+                    self.source_reorder_drag = Some(index as usize);
+                    self.settings.source_drag = Some(index as usize);
+                    return;
                 }
                 if let Control::Segmented(options) = item.control {
                     let seg_track = Settings::segmented_track_rect(row, options.len());
@@ -740,6 +751,11 @@ impl PlayerView {
             self.cancel_press();
             return;
         }
+        if self.source_reorder_drag.take().is_some() {
+            self.settings.source_drag = None;
+            self.cancel_press();
+            return;
+        }
         if let Some(mut drag)=self.switch_drag.take(){
             drag.update(x);self.settings.finish_switch(drag.index,drag.fraction,drag.moved,self.now_ms());
             self.sync_profile_display();self.cancel_press();return;
@@ -810,6 +826,7 @@ impl PlayerView {
         self.panel_press_candidate=None;
         self.inline_switch_drag=None;
         self.switch_drag=None;self.settings.switch_preview=None;
+        self.source_reorder_drag=None;self.settings.source_drag=None;
         self.segmented_drag=None;self.settings.cancel_segmented_drag();
         self.pressed=None;
         self.press_gesture.cancel();
@@ -1086,6 +1103,36 @@ impl PlayerView {
                 drag.fraction = crate::player::details::switch_fraction(drag.track, x);
                 if let Some(spring) = self.smart_switch_springs.get_mut(&drag.key) {
                     spring.set_position(drag.fraction as f64);
+                }
+            }
+            return;
+        }
+        if let Some(cur_idx) = self.source_reorder_drag {
+            if let Some(panel_rect) = self.panel_bounds.last().copied() {
+                let source_rows: Vec<(usize, Box4)> = self
+                    .settings
+                    .rows(panel_rect)
+                    .into_iter()
+                    .filter(|(_, item, _)| item.key.starts_with("lyrics.enabledSources."))
+                    .map(|(i, _, r)| (i, r))
+                    .collect();
+                if let Some((target_idx, _)) = source_rows
+                    .iter()
+                    .min_by(|a, b| {
+                        (y - a.1.centre().1)
+                            .abs()
+                            .partial_cmp(&(y - b.1.centre().1).abs())
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .copied()
+                {
+                    if target_idx != cur_idx {
+                        let now = self.now_ms();
+                        if self.settings.move_source_order(cur_idx, target_idx, now) {
+                            self.source_reorder_drag = Some(target_idx);
+                            self.settings.source_drag = Some(target_idx);
+                        }
+                    }
                 }
             }
             return;

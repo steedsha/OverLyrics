@@ -587,6 +587,19 @@ pub fn score_candidate(track: &Track, cand: &Candidate) -> TrackScore {
             result.raw_level = LOW.to_string();
         }
     }
+    if result.parts.artist.as_deref() == Some(NO_MATCH) {
+        let want = crate::strings::primary_artist(track);
+        let cand_artists = normalized.artist_list().unwrap_or_default();
+        if !want.is_empty()
+            && !crate::identity::artist_ok(&cand_artists, &want)
+            && !crate::identity::is_cross_script(&want, &cand_artists)
+        {
+            result.score = result.score.min(10.0);
+            result.percent = percent_of(LOW);
+            result.level = LOW.to_string();
+            result.raw_level = LOW.to_string();
+        }
+    }
     result
 }
 
@@ -616,5 +629,38 @@ mod candidate_scoring_tests {
         wrong_sec_only.duration_sec = Some(210.5);
         let good = score_candidate(&song, &wrong_sec_only);
         assert!(good.percent >= 90.0, "expected >= 90%, got {}", good.percent);
+    }
+
+    #[test]
+    fn same_script_wrong_artist_is_capped_below_threshold_while_cross_script_is_not() {
+        let song = Track {
+            title: "Wild Horses".into(),
+            artist: Some("Birdy".into()),
+            duration_ms: Some(181_000.0),
+            ..Default::default()
+        };
+        let wrong_artist = Candidate {
+            title: "Wild Horses".into(),
+            artist: Some("The Rolling Stones".into()),
+            duration_sec: Some(181.0),
+            ..Default::default()
+        };
+        let bad = score_candidate(&song, &wrong_artist);
+        assert!(bad.percent < 70.0, "expected < 70%, got {}", bad.percent);
+
+        let cross_song = Track {
+            title: "Mojito".into(),
+            artist: Some("Jay Chou".into()),
+            duration_ms: Some(185_000.0),
+            ..Default::default()
+        };
+        let cross_cand = Candidate {
+            title: "Mojito".into(),
+            artist: Some("周杰伦".into()),
+            duration_sec: Some(185.0),
+            ..Default::default()
+        };
+        let cross = score_candidate(&cross_song, &cross_cand);
+        assert!(cross.percent >= 70.0, "expected >= 70%, got {}", cross.percent);
     }
 }

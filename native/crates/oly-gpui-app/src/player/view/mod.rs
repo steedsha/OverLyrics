@@ -77,6 +77,7 @@ pub struct PlayerView {
     translation_signature: Option<(u64,String,serde_json::Value)>,
     translated_rows: Vec<super::translation::TranslationPatch>,
     search_config: Option<serde_json::Value>,
+    priority_config: Option<serde_json::Value>,
     pressed_candidate: Option<(String,String,usize)>,
     focus: FocusHandle,
     scene: Option<PlayerScene>,
@@ -96,6 +97,7 @@ pub struct PlayerView {
     pending_mode:Option<u8>,
     switch_drag:Option<super::details::SwitchDrag>,
     segmented_drag: Option<(usize, &'static str, Box4, usize)>,
+    source_reorder_drag: Option<usize>,
     pre_fullscreen_mode: u8,
     last_fullscreen: bool,
     always_on_top: bool,
@@ -295,7 +297,7 @@ impl PlayerView {
         let scenario = cfg.scenario.as_deref().and_then(Scenario::named);
         let sync=SyncState::new(cfg.source==Source::Live);
         let start_idle = cfg.source == Source::Live && !cfg.settings_only;
-        let mut this = Self {settings_host:None,settings_child:None,settings_child_view:None,desktop_child:None,desktop_bridge:super::desktop_lyrics::SharedDesktopBridge::new(),desktop_candidates_cache:Arc::new(Vec::new()),desktop_candidates_next_ms:0.0,pending_desktop_lyrics:false,main_hwnd:None,pending_settings_window:None,sync_settings_child_config:false,pending_import_rx:None,native_background:None,doc_auto_picked:false,auto_pick_persisted:false,qa_frame_sample:None,smart_translation_worker:None,translation_signature:None,translated_rows:Vec::new(),search_config:None,pressed_candidate:None,
+        let mut this = Self {settings_host:None,settings_child:None,settings_child_view:None,desktop_child:None,desktop_bridge:super::desktop_lyrics::SharedDesktopBridge::new(),desktop_candidates_cache:Arc::new(Vec::new()),desktop_candidates_next_ms:0.0,pending_desktop_lyrics:false,main_hwnd:None,pending_settings_window:None,sync_settings_child_config:false,pending_import_rx:None,native_background:None,doc_auto_picked:false,auto_pick_persisted:false,qa_frame_sample:None,smart_translation_worker:None,translation_signature:None,translated_rows:Vec::new(),search_config:None,priority_config:None,pressed_candidate:None,
             cfg,
             focus: cx.focus_handle(),
             scene: None,
@@ -310,7 +312,7 @@ impl PlayerView {
             shaper,
             display: Display::default(),
             settings:Settings::default(),
-            sync,pending_mode:None,switch_drag:None,segmented_drag:None,pre_fullscreen_mode:2,last_fullscreen:false,always_on_top:false,applied_always_on_top:None,window_controls_alpha:0.0,pending_minimize:false,pending_quit:false,picker_scroll_spring:{let mut s=oly_core::scroll::Spring::new(0.0);s.update_params(oly_core::scroll::SpringParams::new(220.0,26.0));s},picker_capacity:4,picker_kind:PickerKind::Lyrics,chrome_wake_ms:0.,cursor_idle_ms:0.,cursor_hide_pending:false,browse_idle_ms:0.,lyrics_user_hidden:false,lyrics_auto_hidden:start_idle,lyrics_user_force_shown:false,lyrics_center:{let mut s=oly_core::scroll::Spring::new(if start_idle {1.0} else {0.0});s.update_params(oly_core::scroll::SpringParams::new(140.0,22.0));s},lyrics_reveal_alpha:if start_idle {0.0} else {1.0},staged_mode:None,wide_size:None,last_window_bounds:None,
+            sync,pending_mode:None,switch_drag:None,segmented_drag:None,source_reorder_drag:None,pre_fullscreen_mode:2,last_fullscreen:false,always_on_top:false,applied_always_on_top:None,window_controls_alpha:0.0,pending_minimize:false,pending_quit:false,picker_scroll_spring:{let mut s=oly_core::scroll::Spring::new(0.0);s.update_params(oly_core::scroll::SpringParams::new(220.0,26.0));s},picker_capacity:4,picker_kind:PickerKind::Lyrics,chrome_wake_ms:0.,cursor_idle_ms:0.,cursor_hide_pending:false,browse_idle_ms:0.,lyrics_user_hidden:false,lyrics_auto_hidden:start_idle,lyrics_user_force_shown:false,lyrics_center:{let mut s=oly_core::scroll::Spring::new(if start_idle {1.0} else {0.0});s.update_params(oly_core::scroll::SpringParams::new(140.0,22.0));s},lyrics_reveal_alpha:if start_idle {0.0} else {1.0},staged_mode:None,wide_size:None,last_window_bounds:None,
             mode_transition:None,geometry_memory:Default::default(),
             volume_req_id:0,volume_read_id:None,volume_read_deadline_ms:None,volume_cached:None,
             pending_motion_path:None,motion_debounce_deadline_ms:None,motion_dispatched:None,motion_needs_clear:false,motion_last_enabled:true,motion_fade:0.0,inline_switch_drag:None,bg_cover_hash:None,cover_fade:1.0,cover_accent_hex:None,island_wake_ms:-10_000.0,island_drop:0.0,cover_gone_at_ms:None,compact_chrome_alpha:1.0,album_meta_alpha:1.0,
@@ -787,13 +789,36 @@ impl PlayerView {
                             live.candidates = answer.candidates;
                         }
                     } else if let Some((source, id)) = &answer.selected {
-                        if !live.candidates.iter().any(|c| &c.source == source && &c.id == id) {
-                            if let Some(kept) = answer
+                        if let Some(kept) = answer
+                            .candidates
+                            .into_iter()
+                            .find(|c| &c.source == source && &c.id == id)
+                        {
+                            if let Some(existing) = live
                                 .candidates
-                                .into_iter()
+                                .iter_mut()
                                 .find(|c| &c.source == source && &c.id == id)
                             {
+                                if kept.verified.is_some() {
+                                    existing.verified = kept.verified;
+                                    existing.probe_failed = None;
+                                    existing.probe_timed_out = None;
+                                    existing.probe_error = None;
+                                }
+                            } else {
                                 live.candidates.push(kept);
+                            }
+                        }
+                    } else if let Some((source, id)) = &answer.failed_pick {
+                        if let Some(existing) = live
+                            .candidates
+                            .iter_mut()
+                            .find(|c| &c.source == source && &c.id == id)
+                        {
+                            existing.probe_failed = Some(true);
+                            existing.probe_timed_out = None;
+                            if !answer.error.is_empty() {
+                                existing.probe_error = Some(answer.error.clone());
                             }
                         }
                     }
