@@ -88,7 +88,7 @@ pub enum SpringFeel { Soft, Standard, Lively }
 
 impl Default for Display {
     fn default() -> Self {
-        Self::from_config(&serde_json::from_str(include_str!("../../../oly-core/src/config_defaults.json")).expect("bundled config"))
+        Self::from_config(&oly_core::config::default_config())
     }
 }
 
@@ -1169,7 +1169,7 @@ mod tests {
 
     #[test]
     fn config_uses_active_profile_and_legacy_font_inheritance() {
-        let config: serde_json::Value = serde_json::from_str(include_str!("../../../oly-core/src/config_defaults.json")).unwrap();
+        let config: serde_json::Value = oly_core::config::default_config();
         let cover = Display::from_config(&config);
         assert_eq!((cover.font_size, cover.top_offset, cover.weight), (95.0, 30.0, 650.0));
         assert_eq!((cover.line_gap, cover.inner_gap), (0.02, 0.2));

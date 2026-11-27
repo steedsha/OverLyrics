@@ -426,10 +426,7 @@ impl Default for Settings {
             display_mode_label: None,
             editing_key: None,
             editing_draft: String::new(),
-            config: serde_json::from_str(include_str!(
-                "../../../oly-core/src/config_defaults.json"
-            ))
-            .expect("display defaults"),
+            config: oly_core::config::default_config(),
             open: false,
             page: 0,
             title: "歌词设置",

@@ -24,12 +24,20 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use serde_json::{Map, Value};
 
 /// Defaults shipped verbatim from the reference implementation.
 const DEFAULTS: &str = include_str!("config_defaults.json");
+
+/// Parsed default configuration document (cached once per process).
+pub fn default_config() -> Value {
+    static PARSED: OnceLock<Value> = OnceLock::new();
+    PARSED
+        .get_or_init(|| serde_json::from_str(DEFAULTS).unwrap_or(Value::Null))
+        .clone()
+}
 
 /// Accent colour used when `display.uiAccentColor` is absent or malformed.
 /// Mirrors `DEFAULT_COLOR` in the reference `shared/ui-theme.js`.
