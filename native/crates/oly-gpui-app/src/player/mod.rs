@@ -35,3 +35,4 @@ pub mod versions;
 pub mod translation;
 pub mod win32_window;
 pub mod desktop_lyrics;
+pub mod tray;

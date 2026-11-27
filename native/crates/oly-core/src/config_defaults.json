@@ -211,6 +211,7 @@
   },
   "lyrics": {
     "enabledSources": {
+      "custom": true,
       "kugou": true,
       "netease": true,
       "qq": true,
@@ -229,9 +230,10 @@
     "matchThreshold": 70,
     "lyricsCacheMB": 50,
     "playerSyncOffsets": {
-      "apple": -600,
+      "apple": 0,
       "default": 0
     },
+    "appleOffset0Migrated": false,
     "autoTranslate": true,
     "translationOverrides": {},
     "translateEngine": "free",

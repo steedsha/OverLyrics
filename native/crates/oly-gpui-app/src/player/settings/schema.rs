@@ -237,9 +237,10 @@ pub(super) fn application_items(page: usize) -> Vec<Item> {
         ],
         5 => vec![
             slider("lyrics.playerSyncOffsets.apple", "Apple Music 同步偏移", -2000., 2000., 50.),
-            action("action.clearLyricsCache", "清理歌词缓存", "清理", false),
-            action("action.clearCoverCache", "清理封面缓存", "清理", false),
-            action("action.resetTrackOffsets", "重置单曲偏移", "重置", false),
+            action("action.clearLyricsCache", "本地歌词缓存", "清除", false),
+            action("action.clearCoverCache", "动态封面缓存", "清除", false),
+            action("action.resetTrackOffsets", "单曲偏移记录", "清除", false),
+            action("action.clearSourceMemory", "手动选词记录", "清除", false),
             action("action.resetDefaults", "恢复默认设置", "恢复默认", true),
         ],
         6 => vec![

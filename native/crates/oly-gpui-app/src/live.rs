@@ -975,6 +975,10 @@ impl SearchWorker {
         self.service.clear_search_cache();
     }
 
+    pub fn clear_source_memory(&self) -> usize {
+        self.service.clear_source_memory()
+    }
+
     pub fn request(&self, generation: u64, track: Track, candidate: Option<Candidate>) {
         let epoch = self.service.invalidate();
         *self.answer.lock().unwrap_or_else(|e| e.into_inner()) = None;
@@ -1232,6 +1236,7 @@ impl LiveSession {
             &packet.track_key(),
             &packet.title,
             &packet.artist,
+            &packet.album,
             (packet.duration_ms > 0.0).then_some(packet.duration_ms),
             path,
             now_ms,
@@ -1322,6 +1327,10 @@ impl LiveSession {
         let store = oly_core::offsets::LyricOffsets::load(self.config.data_dir())?;
         store.clear()?;
         Ok(())
+    }
+
+    pub fn clear_source_memory(&self) -> usize {
+        self.search.clear_source_memory()
     }
 
     pub fn reset_all_settings(&self) -> anyhow::Result<serde_json::Value> {

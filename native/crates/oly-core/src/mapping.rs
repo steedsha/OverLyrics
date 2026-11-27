@@ -43,7 +43,7 @@ pub struct SyncProfile {
 }
 
 pub const APPLE_PROFILE: SyncProfile = SyncProfile {
-    offset_ms: 2000.0,
+    offset_ms: 1400.0,
     threshold_ms: 1000.0,
     tolerance_ms: 1000.0,
 };
@@ -172,7 +172,7 @@ mod tests {
         // is the mistake that parked the lyric clock behind the audio.
         assert_eq!(DEFAULT_PROFILE.tolerance_ms, 0.0);
         assert_eq!(DEFAULT_PROFILE.threshold_ms, 300.0);
-        assert_eq!(APPLE_PROFILE.offset_ms, 2000.0);
+        assert_eq!(APPLE_PROFILE.offset_ms, 1400.0);
         assert_eq!(APPLE_PROFILE.tolerance_ms, 1000.0);
         assert_eq!(SPOTIFY_PROFILE.offset_ms, 0.0);
         assert_eq!(SPOTIFY_PROFILE.tolerance_ms, 0.0);

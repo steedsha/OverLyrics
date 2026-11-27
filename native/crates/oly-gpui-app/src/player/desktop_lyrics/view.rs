@@ -135,7 +135,9 @@ pub struct DesktopLyricsView {
     buttons: Vec<(Btn, Box4)>,
     volume_popover: Option<AnyWindowHandle>,
     more_popover: Option<AnyWindowHandle>,
+    display_popover: Option<AnyWindowHandle>,
     color_popover: Option<AnyWindowHandle>,
+    lines_popover: Option<AnyWindowHandle>,
     picker_popover: Option<AnyWindowHandle>,
     last_more_anchor: Box4,
     bar_rect: Box4,
@@ -195,7 +197,9 @@ impl DesktopLyricsView {
             buttons: Vec::new(),
             volume_popover: None,
             more_popover: None,
+            display_popover: None,
             color_popover: None,
+            lines_popover: None,
             picker_popover: None,
             last_more_anchor: Box4::default(),
             bar_rect: Box4::default(),
@@ -249,8 +253,26 @@ impl DesktopLyricsView {
         }
     }
 
-    fn close_popovers(&mut self, cx: &mut App) {
+    fn close_lines_popover(&mut self, cx: &mut App) {
+        self.bridge.lines_popover_open.store(false, Ordering::SeqCst);
+        self.bridge.lines_popover_side.store(0, Ordering::SeqCst);
+        if let Some(h) = self.lines_popover.take() {
+            let _ = h.update(cx, |_, w, _| w.remove_window());
+        }
+    }
+
+    fn close_display_popover(&mut self, cx: &mut App) {
         self.close_color_popover(cx);
+        self.close_lines_popover(cx);
+        self.bridge.display_popover_open.store(false, Ordering::SeqCst);
+        self.bridge.display_popover_side.store(0, Ordering::SeqCst);
+        if let Some(h) = self.display_popover.take() {
+            let _ = h.update(cx, |_, w, _| w.remove_window());
+        }
+    }
+
+    fn close_popovers(&mut self, cx: &mut App) {
+        self.close_display_popover(cx);
         if let Some(h) = self.volume_popover.take() {
             let _ = h.update(cx, |_, w, _| w.remove_window());
         }
@@ -335,8 +357,17 @@ impl DesktopLyricsView {
         let wb = window.bounds();
         let wx = f32::from(wb.origin.x);
         let wy = f32::from(wb.origin.y);
-        let ax = wx + anchor.x;
-        let ay = wy + anchor.y;
+        let win_w = f32::from(wb.size.width).max(1.0);
+        let win_h = f32::from(wb.size.height).max(1.0);
+        let effective_anchor = if anchor.w > 1.0 && anchor.h > 1.0 {
+            anchor
+        } else if self.bar_rect.w > 1.0 && self.bar_rect.h > 1.0 {
+            self.bar_rect
+        } else {
+            Box4::new(win_w * 0.5 - 16.0, win_h - 32.0, 32.0, 28.0)
+        };
+        let ax = wx + effective_anchor.x;
+        let ay = wy + effective_anchor.y;
         let (dx, dy, dw, dh) = window
             .display(cx)
             .map(|d| {
@@ -349,20 +380,34 @@ impl DesktopLyricsView {
                 )
             })
             .unwrap_or((0.0, 0.0, 1920.0, 1080.0));
-        let gap = 10.0;
+        let gap = 8.0;
         let (raw_x, raw_y) = match self.cfg.orientation {
             DesktopOrientation::Horizontal => {
-                let cx_a = ax + anchor.w * 0.5 - pop_w * 0.5;
-                let above_y = wy + self.bar_rect.y - pop_h - gap;
-                let below_y = wy + self.bar_rect.bottom() + gap;
-                let py = if above_y >= dy + 8.0 { above_y } else { below_y };
+                let cx_a = ax + effective_anchor.w * 0.5 - pop_w * 0.5;
+                let below_y = wy + win_h + gap;
+                let above_y = wy - pop_h - gap;
+                let space_below = (dy + dh - 8.0) - below_y;
+                let space_above = wy - gap - (dy + 8.0);
+                // Prefer below the lyrics window when room allows so the popover never covers lyrics;
+                // flip above the entire lyrics window when near the bottom edge.
+                let py = if space_below >= pop_h || space_below >= space_above {
+                    below_y
+                } else {
+                    above_y
+                };
                 (cx_a, py)
             }
             DesktopOrientation::Vertical => {
-                let cy_a = ay + anchor.h * 0.5 - pop_h * 0.5;
-                let left_x = wx + self.bar_rect.x - pop_w - gap;
-                let right_x = wx + self.bar_rect.right() + gap;
-                let px_v = if left_x >= dx + 8.0 { left_x } else { right_x };
+                let cy_a = ay + effective_anchor.h * 0.5 - pop_h * 0.5;
+                let right_x = wx + win_w + gap;
+                let left_x = wx - pop_w - gap;
+                let space_right = (dx + dw - 8.0) - right_x;
+                let space_left = wx - gap - (dx + 8.0);
+                let px_v = if space_right >= pop_w || space_right >= space_left {
+                    right_x
+                } else {
+                    left_x
+                };
                 (px_v, cy_a)
             }
         };
@@ -442,17 +487,17 @@ impl DesktopLyricsView {
     fn toggle_more_popover(&mut self, anchor: Box4, window: &mut Window, cx: &mut Context<Self>) {
         self.last_more_anchor = anchor;
         if let Some(h) = self.more_popover.take() {
-            self.close_color_popover(cx);
+            self.close_display_popover(cx);
             if h.update(cx, |_, w, _| w.remove_window()).is_ok() {
                 return;
             }
         }
         if self.bridge.was_more_recently_closed() {
-            self.close_color_popover(cx);
+            self.close_display_popover(cx);
             return;
         }
         self.close_popovers(cx);
-        let (pw, ph) = (252.0_f32 + POPOVER_ELASTIC_PAD * 2.0, 272.0_f32 + POPOVER_ELASTIC_PAD * 2.0);
+        let (pw, ph) = (252.0_f32 + POPOVER_ELASTIC_PAD * 2.0, 212.0_f32 + POPOVER_ELASTIC_PAD * 2.0);
         let pos = self.open_popover_rect(anchor, pw, ph, window, cx);
         let bridge = self.bridge.clone();
         self.more_popover = Self::spawn_glass_popover(
@@ -465,23 +510,15 @@ impl DesktopLyricsView {
         );
     }
 
-    fn open_color_popover(
-        &mut self,
-        more_card_screen: Box4,
-        color_row_center_y_screen: f32,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(h) = self.color_popover.take() {
-            self.bridge.color_popover_open.store(false, Ordering::SeqCst);
-            self.bridge.color_popover_side.store(0, Ordering::SeqCst);
-            if h.update(cx, |_, w, _| w.remove_window()).is_ok() {
-                return;
-            }
-        }
-        if self.bridge.was_color_recently_closed() {
-            return;
-        }
+    fn side_popover_origin(
+        parent_card_screen: Box4,
+        row_center_y_screen: f32,
+        card_w: f32,
+        card_h: f32,
+        align_y_in_card: f32,
+        window: &Window,
+        cx: &App,
+    ) -> ((f32, f32), i8) {
         let (dx, dy, dw, dh) = window
             .display(cx)
             .map(|d| {
@@ -494,18 +531,88 @@ impl DesktopLyricsView {
                 )
             })
             .unwrap_or((0.0, 0.0, 1920.0, 1080.0));
-        let card_w = 240.0_f32;
-        let card_h = 214.0_f32;
         let pw = card_w + POPOVER_ELASTIC_PAD * 2.0;
         let ph = card_h + POPOVER_ELASTIC_PAD * 2.0;
         let gap = 8.0_f32;
-        let right_x = more_card_screen.right() + gap - POPOVER_ELASTIC_PAD;
-        let left_x = more_card_screen.x - gap - card_w - POPOVER_ELASTIC_PAD;
+        let right_x = parent_card_screen.right() + gap - POPOVER_ELASTIC_PAD;
+        let left_x = parent_card_screen.x - gap - card_w - POPOVER_ELASTIC_PAD;
         let (px_c, side): (f32, i8) = if right_x + pw <= dx + dw - 6.0 {
             (right_x, 1)
         } else {
             (left_x.max(dx + 6.0), -1)
         };
+        let py_c = (row_center_y_screen - align_y_in_card - POPOVER_ELASTIC_PAD)
+            .clamp(dy + 6.0, (dy + dh - ph - 6.0).max(dy + 6.0));
+        ((px_c, py_c), side)
+    }
+
+    fn open_display_popover(
+        &mut self,
+        more_card_screen: Box4,
+        row_center_y_screen: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(h) = self.display_popover.take() {
+            self.close_color_popover(cx);
+            self.close_lines_popover(cx);
+            self.bridge.display_popover_open.store(false, Ordering::SeqCst);
+            self.bridge.display_popover_side.store(0, Ordering::SeqCst);
+            if h.update(cx, |_, w, _| w.remove_window()).is_ok() {
+                return;
+            }
+        }
+        if self.bridge.was_display_recently_closed() {
+            return;
+        }
+        let card_w = 252.0_f32;
+        let card_h = 160.0_f32;
+        let pw = card_w + POPOVER_ELASTIC_PAD * 2.0;
+        let ph = card_h + POPOVER_ELASTIC_PAD * 2.0;
+        let (pos, side) = Self::side_popover_origin(
+            more_card_screen,
+            row_center_y_screen,
+            card_w,
+            card_h,
+            26.0,
+            window,
+            cx,
+        );
+        self.bridge.display_popover_open.store(true, Ordering::SeqCst);
+        self.bridge.display_popover_side.store(side, Ordering::SeqCst);
+        let bridge = self.bridge.clone();
+        self.display_popover = Self::spawn_glass_popover(
+            "OverLyrics Desktop Display",
+            pos,
+            (pw, ph),
+            window,
+            cx,
+            move |_, _| DesktopDisplayPopover::new(bridge),
+        );
+    }
+
+    fn open_color_popover(
+        &mut self,
+        parent_card_screen: Box4,
+        color_row_center_y_screen: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_lines_popover(cx);
+        if let Some(h) = self.color_popover.take() {
+            self.bridge.color_popover_open.store(false, Ordering::SeqCst);
+            self.bridge.color_popover_side.store(0, Ordering::SeqCst);
+            if h.update(cx, |_, w, _| w.remove_window()).is_ok() {
+                return;
+            }
+        }
+        if self.bridge.was_color_recently_closed() {
+            return;
+        }
+        let card_w = 240.0_f32;
+        let card_h = 214.0_f32;
+        let pw = card_w + POPOVER_ELASTIC_PAD * 2.0;
+        let ph = card_h + POPOVER_ELASTIC_PAD * 2.0;
         let list_top_in_card = 8.0_f32;
         let item_h = 32.0_f32;
         let selected_row_center_in_card = if let Some(idx) = COLOR_PRESETS
@@ -516,18 +623,71 @@ impl DesktopLyricsView {
         } else {
             list_top_in_card + COLOR_PRESETS.len() as f32 * item_h + 6.0 + item_h * 0.5
         };
-        let py_c = (color_row_center_y_screen - selected_row_center_in_card - POPOVER_ELASTIC_PAD)
-            .clamp(dy + 6.0, (dy + dh - ph - 6.0).max(dy + 6.0));
+        let (pos, side) = Self::side_popover_origin(
+            parent_card_screen,
+            color_row_center_y_screen,
+            card_w,
+            card_h,
+            selected_row_center_in_card,
+            window,
+            cx,
+        );
         self.bridge.color_popover_open.store(true, Ordering::SeqCst);
         self.bridge.color_popover_side.store(side, Ordering::SeqCst);
         let bridge = self.bridge.clone();
         self.color_popover = Self::spawn_glass_popover(
             "OverLyrics Desktop Color",
-            (px_c, py_c),
+            pos,
             (pw, ph),
             window,
             cx,
             move |_, _| DesktopColorPopover::new(bridge),
+        );
+    }
+
+    fn open_lines_popover(
+        &mut self,
+        parent_card_screen: Box4,
+        row_center_y_screen: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_color_popover(cx);
+        if let Some(h) = self.lines_popover.take() {
+            self.bridge.lines_popover_open.store(false, Ordering::SeqCst);
+            self.bridge.lines_popover_side.store(0, Ordering::SeqCst);
+            if h.update(cx, |_, w, _| w.remove_window()).is_ok() {
+                return;
+            }
+        }
+        if self.bridge.was_lines_recently_closed() {
+            return;
+        }
+        let card_w = 132.0_f32;
+        let card_h = 114.0_f32;
+        let pw = card_w + POPOVER_ELASTIC_PAD * 2.0;
+        let ph = card_h + POPOVER_ELASTIC_PAD * 2.0;
+        let sel_idx = self.cfg.display_lines.clamp(1, 3).saturating_sub(1) as f32;
+        let align_y = 8.0 + sel_idx * 32.0 + 16.0;
+        let (pos, side) = Self::side_popover_origin(
+            parent_card_screen,
+            row_center_y_screen,
+            card_w,
+            card_h,
+            align_y,
+            window,
+            cx,
+        );
+        self.bridge.lines_popover_open.store(true, Ordering::SeqCst);
+        self.bridge.lines_popover_side.store(side, Ordering::SeqCst);
+        let bridge = self.bridge.clone();
+        self.lines_popover = Self::spawn_glass_popover(
+            "OverLyrics Desktop Lines",
+            pos,
+            (pw, ph),
+            window,
+            cx,
+            move |_, _| DesktopLinesPopover::new(bridge),
         );
     }
 
@@ -1232,11 +1392,29 @@ impl Render for DesktopLyricsView {
                     self.bridge
                         .push(DesktopCommand::SaveConfig(self.cfg.clone()));
                 }
-                PopoverAction::OpenColorPopover(more_card_screen, color_row_center_y) => {
-                    self.open_color_popover(more_card_screen, color_row_center_y, window, cx);
+                PopoverAction::SetDisplayLines(n) => {
+                    self.cfg.display_lines = n.clamp(1, 3);
+                    self.bridge.set_cfg(self.cfg.clone());
+                    self.bridge
+                        .push(DesktopCommand::SaveConfig(self.cfg.clone()));
+                }
+                PopoverAction::OpenDisplayPopover(more_card_screen, row_center_y) => {
+                    self.open_display_popover(more_card_screen, row_center_y, window, cx);
+                }
+                PopoverAction::CloseDisplayPopover => {
+                    self.close_display_popover(cx);
+                }
+                PopoverAction::OpenColorPopover(parent_card_screen, color_row_center_y) => {
+                    self.open_color_popover(parent_card_screen, color_row_center_y, window, cx);
                 }
                 PopoverAction::CloseColorPopover => {
                     self.close_color_popover(cx);
+                }
+                PopoverAction::OpenLinesPopover(parent_card_screen, row_center_y) => {
+                    self.open_lines_popover(parent_card_screen, row_center_y, window, cx);
+                }
+                PopoverAction::CloseLinesPopover => {
+                    self.close_lines_popover(cx);
                 }
                 PopoverAction::OpenLyricsPicker => {
                     self.open_lyrics_picker_popover(window, cx);
@@ -1251,6 +1429,12 @@ impl Render for DesktopLyricsView {
                     return div().into_any_element();
                 }
             }
+        }
+
+        // Sync lock state if toggled externally (e.g. from the system tray switch).
+        let bridge_locked = self.bridge.read_cfg().locked;
+        if bridge_locked != self.cfg.locked {
+            self.set_locked(bridge_locked, now, cx);
         }
 
         let mut os_cursor_inside = self.cursor.is_some();
@@ -1629,9 +1813,49 @@ impl Render for DesktopLyricsView {
         let btn_feedback = self.btn_feedback;
 
         let horiz_avail_w = (win_w - 48.0).max(200.0);
+        let display_lines = self.cfg.display_lines.clamp(1, 3);
         let shaped_active = snap.active_row.as_ref().and_then(|row| {
             self.shape_single_line(row, &snap.display, font_size, horiz_avail_w, auto_scroll)
         });
+        let shaped_multi: Vec<(usize, Row, Arc<RowLines>)> = if orient == DesktopOrientation::Horizontal
+            && display_lines > 1
+            && snap.display_rows.len() > 1
+        {
+            let count = snap.display_rows.len().min(display_lines as usize);
+            let bilingual_slots: f32 = snap
+                .display_rows
+                .iter()
+                .take(count)
+                .map(|(_, r)| {
+                    if show_trans && !r.translation.trim().is_empty() {
+                        1.72
+                    } else {
+                        1.08
+                    }
+                })
+                .sum();
+            let avail_per_slot = ((win_h - 20.0) / bilingual_slots.max(1.0)).max(18.0);
+            let fit_scale = (avail_per_slot / (font_size * 1.25)).clamp(0.38, 1.0);
+            snap.display_rows
+                .iter()
+                .take(count)
+                .filter_map(|(idx, r)| {
+                    let is_active = Some(*idx) == snap.active_row_index;
+                    let role_scale = if r.is_bg {
+                        0.76
+                    } else if is_active {
+                        1.0
+                    } else {
+                        0.86
+                    };
+                    let row_fs = (font_size * fit_scale * role_scale).clamp(13.0, MAX_FONT);
+                    self.shape_single_line(r, &snap.display, row_fs, horiz_avail_w, false)
+                        .map(|s| (*idx, r.clone(), s))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         // Smooth progress-driven scrolling (or fit-by-font-size when auto_scroll is off) for both orientations.
         let mut vert_main_scroll = self.vert_main_scroll;
@@ -2091,6 +2315,108 @@ impl Render for DesktopLyricsView {
                         match (snap.active_row.as_ref(), shaped_active.as_ref()) {
                             (Some(row), Some(shaped)) => match orient {
                                 DesktopOrientation::Horizontal => {
+                                    if !shaped_multi.is_empty() {
+                                        let gap = 5.0_f32;
+                                        let total_h: f32 = shaped_multi
+                                            .iter()
+                                            .enumerate()
+                                            .map(|(k, (_, r, s))| {
+                                                let row_tfs = (s.font_size * 0.58).clamp(10.5, 26.0);
+                                                let th = if show_trans && !r.translation.trim().is_empty() {
+                                                    2.0 + row_tfs * 1.18
+                                                } else {
+                                                    0.0
+                                                };
+                                                s.line_height + th + if k > 0 { gap } else { 0.0 }
+                                            })
+                                            .sum();
+                                        let mut cur_y = horiz_area_top + (horiz_area_h - total_h) * 0.5;
+                                        let origin_x = (win_w - horiz_avail_w) * 0.5;
+                                        for (idx, r, s) in &shaped_multi {
+                                            let is_active = Some(*idx) == snap.active_row_index
+                                                || (r.is_bg
+                                                    && snap.position_ms >= r.start_ms
+                                                    && snap.position_ms <= r.end_ms + 300.0);
+                                            let dim = if is_active {
+                                                if r.is_bg { 0.84 } else { 1.0 }
+                                            } else if r.is_bg {
+                                                0.46
+                                            } else {
+                                                0.54
+                                            };
+                                            let light = row_light(r, snap.position_ms, is_active, false, &snap.display);
+                                            let progress = paint::line_progress(
+                                                snap.position_ms,
+                                                r.start_ms,
+                                                r.duration_ms(),
+                                            );
+                                            let masks: Vec<f32> = s
+                                                .masks
+                                                .iter()
+                                                .map(|frames| position_at(frames, progress))
+                                                .collect();
+                                            let row_light_val = RowLight {
+                                                base: (light.dark * dim * line_fade).clamp(0.0, 1.0),
+                                                dark: (light.dark * dim * line_fade).clamp(0.0, 1.0),
+                                                bright: (light.bright * dim * line_fade).clamp(0.0, 1.0),
+                                                mask: if is_active && light.sweep.is_some() {
+                                                    Some(masks)
+                                                } else {
+                                                    None
+                                                },
+                                                glow: if is_active {
+                                                    light.glow.map(|mut g| {
+                                                        for v in &mut g {
+                                                            *v *= dim * line_fade;
+                                                        }
+                                                        g
+                                                    })
+                                                } else {
+                                                    None
+                                                },
+                                            };
+                                            paint::paint_row_with_shadow(
+                                                window,
+                                                s,
+                                                origin_x,
+                                                cur_y,
+                                                s.line_height,
+                                                s.font_size,
+                                                &s.words,
+                                                &row_light_val,
+                                                snap.position_ms,
+                                                1.0,
+                                                WrapperTransform::default(),
+                                                -10000.0,
+                                                10000.0,
+                                                1.0,
+                                                horiz_avail_w,
+                                                LineAlign::Center,
+                                                0.0,
+                                                DESKTOP_DROP_SHADOW,
+                                                Some(text_color),
+                                            );
+                                            cur_y += s.line_height;
+                                            if show_trans && !r.translation.trim().is_empty() {
+                                                let row_tfs = (s.font_size * 0.58).clamp(10.5, 26.0);
+                                                let trans_a = (snap.display.trans_current.max(0.75) * dim * line_fade)
+                                                    .clamp(0.0, 1.0);
+                                                paint_horiz_translation(
+                                                    window,
+                                                    &r.translation,
+                                                    win_w,
+                                                    cur_y + 2.0,
+                                                    row_tfs,
+                                                    text_color,
+                                                    trans_a,
+                                                    false,
+                                                    0.0,
+                                                );
+                                                cur_y += 2.0 + row_tfs * 1.18;
+                                            }
+                                            cur_y += gap;
+                                        }
+                                    } else {
                                     let light =
                                         row_light(row, snap.position_ms, true, false, &snap.display);
                                     let progress = paint::line_progress(
@@ -2191,6 +2517,7 @@ impl Render for DesktopLyricsView {
                                             auto_scroll,
                                             horiz_trans_scroll,
                                         );
+                                    }
                                     }
                                 }
                                 DesktopOrientation::Vertical => {
@@ -2376,15 +2703,18 @@ pub(super) fn snap_axis(
     disp_len: f32,
     was_snapped: bool,
 ) -> (f32, bool) {
+    let start_pos = disp_origin;
     let center_pos = disp_origin + (disp_len - win_len) * 0.5;
+    let end_pos = disp_origin + disp_len - win_len;
     let threshold = if was_snapped { 18.0 } else { 12.0 };
-    if (raw - center_pos).abs() <= threshold {
-        (center_pos, true)
-    } else {
-        let min_v = disp_origin - win_len + 64.0;
-        let max_v = disp_origin + disp_len - 64.0;
-        (raw.clamp(min_v, max_v), false)
+    for target in [start_pos, end_pos, center_pos] {
+        if (raw - target).abs() <= threshold {
+            return (target, true);
+        }
     }
+    let min_v = disp_origin - win_len + 64.0;
+    let max_v = disp_origin + disp_len - 64.0;
+    (raw.clamp(min_v, max_v), false)
 }
 
 fn snap_and_clamp_drag(
@@ -2400,7 +2730,7 @@ fn snap_and_clamp_drag(
     let Some(d) = window.display(cx) else {
         return (raw_x, raw_y, false, false);
     };
-    let b = d.bounds();
+    let b = d.visible_bounds();
     let (nx, sx) = snap_axis(
         raw_x,
         win_w,

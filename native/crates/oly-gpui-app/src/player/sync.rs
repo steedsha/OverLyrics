@@ -117,6 +117,38 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(dir);
     }
+    #[test]
+    fn clear_all_wipes_worker_memory_and_disk() {
+        let dir = root();
+        let mut state = SyncState::with_root(true, Some(dir.clone()));
+        state.select(Some(song("One", "")), "qq");
+        settle(&mut state);
+        state.nudge(400).unwrap();
+        settle(&mut state);
+        assert_eq!(state.offset_ms(), 400);
+
+        state.select(Some(song("Two", "")), "netease");
+        settle(&mut state);
+        state.nudge(-200).unwrap();
+        settle(&mut state);
+        assert_eq!(state.offset_ms(), -200);
+
+        state.clear_all().unwrap();
+        assert_eq!(state.offset_ms(), 0);
+
+        // Switching back to a previously offset song must read 0 from worker memory.
+        state.select(Some(song("One", "")), "qq");
+        settle(&mut state);
+        assert_eq!(state.offset_ms(), 0);
+
+        // Nudging after clear must not resurrect previously cleared tracks on disk.
+        state.nudge(100).unwrap();
+        settle(&mut state);
+        let disk = LyricOffsets::load(&dir).unwrap();
+        assert_eq!(disk.get(&song("One", ""), "qq").ms, 100.0);
+        assert_eq!(disk.get(&song("Two", ""), "netease").ms, 0.0);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
 
 use std::collections::BTreeMap;
@@ -126,6 +158,11 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use oly_core::offsets::{
     offset_scope, LyricOffsets, OffsetContext, OffsetScope, SongRef, MAX_ABS_MS,
 };
+
+enum WorkerCmd {
+    QueryOrSave(Request),
+    ClearAll(Sender<Result<(), String>>),
+}
 
 struct Request {
     generation: u64,
@@ -158,7 +195,7 @@ pub struct SyncState {
     generation: u64,
     sequence: u64,
     completed: u64,
-    worker: Option<(Sender<Request>, Receiver<Receipt>)>,
+    worker: Option<(Sender<WorkerCmd>, Receiver<Receipt>)>,
 }
 
 impl SyncState {
@@ -174,7 +211,7 @@ impl SyncState {
                 std::env::var_os("APPDATA")
                     .map(|root| PathBuf::from(root).join("OverLyrics"))
             });
-            let (requests, receiver) = mpsc::channel::<Request>();
+            let (requests, receiver) = mpsc::channel::<WorkerCmd>();
             let (sender, receipts) = mpsc::channel::<Receipt>();
             // One owner means saves remain ordered and never race on the
             // core store's atomic temporary file. Dropping the UI drains queued
@@ -184,35 +221,46 @@ impl SyncState {
                     .as_deref()
                     .ok_or_else(|| "无法确定歌词偏移存储目录".to_string())
                     .and_then(|dir| LyricOffsets::load(dir).map_err(|e| e.to_string()));
-                while let Ok(request) = receiver.recv() {
-                    let (value, error) = match &store {
-                        Ok(store) => {
-                            let saved = store.get(&request.song, &request.provider).ms as i64;
-                            match request.target {
-                                Some(target) => match store.nudge(
-                                    &request.song,
-                                    &request.provider,
-                                    (target - saved) as f64,
-                                ) {
-                                    Ok(snapshot) => (snapshot.ms as i64, None),
-                                    Err(error) => (saved, Some(error.to_string())),
-                                },
-                                None => (saved, None),
+                while let Ok(cmd) = receiver.recv() {
+                    match cmd {
+                        WorkerCmd::ClearAll(reply) => {
+                            let res = match &store {
+                                Ok(store) => store.clear().map_err(|e| e.to_string()),
+                                Err(error) => Err(error.clone()),
+                            };
+                            let _ = reply.send(res);
+                        }
+                        WorkerCmd::QueryOrSave(request) => {
+                            let (value, error) = match &store {
+                                Ok(store) => {
+                                    let saved = store.get(&request.song, &request.provider).ms as i64;
+                                    match request.target {
+                                        Some(target) => match store.nudge(
+                                            &request.song,
+                                            &request.provider,
+                                            (target - saved) as f64,
+                                        ) {
+                                            Ok(snapshot) => (snapshot.ms as i64, None),
+                                            Err(error) => (saved, Some(error.to_string())),
+                                        },
+                                        None => (saved, None),
+                                    }
+                                }
+                                Err(error) => (0, Some(error.clone())),
+                            };
+                            if sender
+                                .send(Receipt {
+                                    generation: request.generation,
+                                    sequence: request.sequence,
+                                    key: request.key,
+                                    value,
+                                    error,
+                                })
+                                .is_err()
+                            {
+                                // Continue draining writes even if the view was closed.
                             }
                         }
-                        Err(error) => (0, Some(error.clone())),
-                    };
-                    if sender
-                        .send(Receipt {
-                            generation: request.generation,
-                            sequence: request.sequence,
-                            key: request.key,
-                            value,
-                            error,
-                        })
-                        .is_err()
-                    {
-                        // Continue draining writes even if the view was closed.
                     }
                 }
             });
@@ -267,15 +315,39 @@ impl SyncState {
             return Ok(());
         };
         sender
-            .send(Request {
+            .send(WorkerCmd::QueryOrSave(Request {
                 generation: self.generation,
                 sequence: self.sequence,
                 song: song.clone(),
                 provider: self.provider.clone(),
                 key: context.key.clone(),
                 target,
-            })
+            }))
             .map_err(|_| "歌词偏移保存线程已停止".to_string())
+    }
+
+    /// Synchronously clears both the worker's in-memory `LyricOffsets` store
+    /// and the on-disk `lyric-offsets.json`, plus any in-memory preview state.
+    pub fn clear_all(&mut self) -> Result<(), String> {
+        self.memory.clear();
+        self.draft = 0;
+        self.generation = self.generation.wrapping_add(1);
+        self.sequence = 0;
+        self.completed = 0;
+        self.ready = true;
+        if let Some((sender, _)) = &self.worker {
+            let (tx, rx) = mpsc::channel();
+            sender
+                .send(WorkerCmd::ClearAll(tx))
+                .map_err(|_| "歌词偏移保存线程已停止".to_string())?;
+            rx.recv()
+                .map_err(|_| "歌词偏移保存线程已停止".to_string())??;
+        }
+        Ok(())
+    }
+
+    pub fn has_worker(&self) -> bool {
+        self.worker.is_some()
     }
 
     /// Positive advances lyrics; negative delays them. Persistent values are

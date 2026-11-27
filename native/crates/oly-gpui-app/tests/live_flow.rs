@@ -332,7 +332,7 @@ fn unix_clock_keeps_apple_and_default_heartbeats_locked_while_elapsed_time_oscil
         ..Default::default()
     };
 
-    // Apple Music (`APPLE_PROFILE`: offset=2000, tolerance=1000) emits updates
+    // Apple Music (`APPLE_PROFILE`: offset=1400, tolerance=1000) emits updates
     // at irregular cadence while WinRT sends 500ms heartbeats; without Unix
     // sample-age compensation `(now - last_updated_unix_ms)`, stale updates
     // rewind backwards and fresh updates surge forwards.
@@ -354,8 +354,8 @@ fn unix_clock_keeps_apple_and_default_heartbeats_locked_while_elapsed_time_oscil
         fixed.feed(pkt.clone(), unix_now);
         fixed.tick(unix_now);
         assert!(
-            (fixed.position(unix_now) - (locked_media + 2_000.0)).abs() < 1e-6,
-            "Unix-aligned Apple clock must stay locked at +2000ms offset without lagging or rushing"
+            (fixed.position(unix_now) - (locked_media + 1_400.0)).abs() < 1e-6,
+            "Unix-aligned Apple clock must stay locked at +1400ms offset without lagging or rushing"
         );
         assert!(
             (fixed.media_position(unix_now) - locked_media).abs() < 1e-6,

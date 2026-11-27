@@ -103,6 +103,9 @@ pub struct Presentation {
     pub status_alpha: f32,
     pub reset_armed: bool,
     pub dragging_source_row: Option<usize>,
+    pub source_drag_swell: f32,
+    pub source_drag_y: f32,
+    pub source_row_offsets: std::collections::HashMap<&'static str, f32>,
 }
 impl Settings {
     pub fn presentation(&self, rect: Box4) -> Presentation {
@@ -271,6 +274,13 @@ impl Settings {
                 .reset_confirm_until_ms
                 .is_some_and(|t| self.last_tick_ms.unwrap_or(0.0) <= t),
             dragging_source_row: self.source_drag,
+            source_drag_swell: self.source_drag_swell,
+            source_drag_y: self.source_drag_y,
+            source_row_offsets: self
+                .source_row_offsets
+                .iter()
+                .map(|(&k, &(pos, _))| (k, pos))
+                .collect(),
         }
     }
 }
@@ -479,17 +489,19 @@ pub fn paint(
             }
         });
     }
-    if p.max_scroll > 0. {
-        let fraction = p.scroll / p.max_scroll;
-        let thumb = (c.h * c.h / (c.h + p.max_scroll)).max(24.);
+    if p.max_scroll > 0.5 {
+        let fraction = (p.scroll / p.max_scroll).clamp(0.0, 1.0);
+        let track_y = c.y + 4.0;
+        let track_h = (c.h - 8.0).max(20.0);
+        let thumb = (track_h * track_h / (track_h + p.max_scroll)).clamp(24.0, track_h);
         chrome::fill_round(
             window,
-            r.right() - 6.,
-            c.y + fraction * (c.h - thumb),
-            2.,
+            r.right() - 7.0,
+            track_y + fraction * (track_h - thumb),
+            2.4,
             thumb,
-            1.,
-            color(0.35),
+            1.2,
+            color(0.24),
         );
     }
     if !p.status.is_empty() && p.status_alpha > 0.005 {
@@ -600,6 +612,21 @@ pub fn paint(
                 );
             }
         });
+        if d.max_scroll > 0.5 {
+            let track_y = d.rect.y + 6.0;
+            let track_h = (d.rect.h - 12.0).max(16.0);
+            let thumb_h = (track_h * track_h / (track_h + d.max_scroll)).clamp(18.0, track_h);
+            let frac = (d.scroll / d.max_scroll).clamp(0.0, 1.0);
+            chrome::fill_round(
+                window,
+                d.rect.right() - 6.0,
+                track_y + frac * (track_h - thumb_h),
+                2.2,
+                thumb_h,
+                1.1,
+                color(0.26),
+            );
+        }
     }
     if let Some(modal) = &p.modal {
         let (box_r, f1, f2, cancel, save) = Settings::modal_rects_with_offset(r, modal, p.modal_offset);
@@ -732,7 +759,7 @@ fn paint_page_rows(
         let label = if item.key.starts_with("lyrics.enabledSources.") {
             if !has_sources {
                 has_sources = true;
-                Some("在线歌词源")
+                Some("歌词来源")
             } else {
                 None
             }
@@ -768,7 +795,7 @@ fn paint_page_rows(
         let (_, first_item, first) = &rows[start];
         let (_, _, last) = &rows[end - 1];
         let header = if first_item.key.starts_with("lyrics.enabledSources.") {
-            Some("在线歌词源")
+            Some("歌词来源")
         } else if first_item.key == ACTIVE_PLAYER_OFFSET_KEY || first_item.key == CUSTOM_PLAYER_OFFSET_KEY {
             Some("播放器同步")
         } else if matches!(first_item.key, "lyrics.artistAliases" | "lyrics.addArtistAlias") {
@@ -962,42 +989,40 @@ fn paint_page_rows(
                 let is_source_row = item.key.starts_with("lyrics.enabledSources.");
                 let is_dragging = is_source_row && p.dragging_source_row == Some(*i);
                 if is_dragging {
-                    chrome::fill_round(
-                        window,
-                        row.x + 2.0,
-                        row.y + 1.0,
-                        row.w - 4.0,
-                        row.h - 2.0,
-                        9.0,
-                        color(0.11),
-                    );
-                    chrome::stroke_round(
-                        window,
-                        row.x + 2.0,
-                        row.y + 1.0,
-                        row.w - 4.0,
-                        row.h - 2.0,
-                        9.0,
-                        0.75,
-                        color(0.22),
-                    );
+                    // Paint the dragged source row in a second pass on top of sliding neighbors.
+                    continue;
                 }
-                let track = if is_source_row {
-                    Settings::source_switch_track(row)
+                let row_dy = if is_source_row {
+                    p.source_row_offsets.get(item.key).copied().unwrap_or(0.0)
                 } else {
-                    crate::player::details::switch_track(row)
+                    0.0
                 };
-                let label_w = (track.x - row.x - 16.).max(40.);
+                let draw_row = Box4::new(row.x, row.y + row_dy, row.w, row.h);
+                let track = if is_source_row {
+                    Settings::source_switch_track(draw_row)
+                } else {
+                    crate::player::details::switch_track(draw_row)
+                };
+                let grip_x = track.x - 24.0;
+                let label_right = if is_source_row { grip_x - 10.0 } else { track.x - 8.0 };
+                let label_w = (label_right - draw_row.x - 8.0).max(40.0);
                 chrome::paint_text_fitted_vcentred(
                     window,
                     item.label,
-                    row.x + 8.,
-                    row.centre().1,
+                    draw_row.x + 8.,
+                    draw_row.centre().1,
                     label_w,
                     12.5,
                     500.,
-                    color(if is_dragging { 0.96 } else { 0.84 }),
+                    color(0.84),
                 );
+                if is_source_row {
+                    let cy = draw_row.centre().1;
+                    let grip_color = color(0.34);
+                    for dy_bar in [-4.2f32, 0.0, 4.2] {
+                        chrome::fill_round(window, grip_x, cy + dy_bar - 0.75, 12.5, 1.5, 0.75, grip_color);
+                    }
+                }
                 let on = value.as_bool().unwrap_or(false);
                 let frac = p
                     .switch_fractions
@@ -1017,14 +1042,6 @@ fn paint_page_rows(
                     p.accent_hex,
                     opacity,
                 );
-                if is_source_row {
-                    let gx = row.right() - 21.0;
-                    let cy = row.centre().1;
-                    let grip_color = color(if is_dragging { 0.85 } else { 0.38 });
-                    for dy_bar in [-4.5f32, 0.0, 4.5] {
-                        chrome::fill_round(window, gx, cy + dy_bar - 0.75, 13.0, 1.5, 0.75, grip_color);
-                    }
-                }
             }
             Control::Text { secret } => {
                 let field = Settings::choice_pill_rect(row);
@@ -1283,6 +1300,109 @@ fn paint_page_rows(
                     );
                 }
             }
+        }
+    }
+    if let Some(drag_idx) = p.dragging_source_row {
+        if let Some((i, item, raw_row)) = rows
+            .iter()
+            .find(|(idx, item, _)| *idx == drag_idx && item.key.starts_with("lyrics.enabledSources."))
+        {
+            let swell = p.source_drag_swell.clamp(0.0, 1.0);
+            let scale = 1.0 + 0.028 * swell;
+            let expand_x = 4.0 * swell;
+            let expand_y = 2.0 * swell;
+            let base_row = Box4::new(
+                raw_row.x + dx,
+                raw_row.y + dy + p.source_drag_y,
+                raw_row.w,
+                raw_row.h,
+            );
+            let card = Box4::new(
+                base_row.x - expand_x,
+                base_row.y - expand_y,
+                base_row.w + expand_x * 2.0,
+                base_row.h + expand_y * 2.0,
+            );
+            chrome::elevation(window, card, 10.5, 0.14 * swell * opacity);
+            let fill = if chrome::is_light_theme() {
+                gpui_kit::Hsla::from(gpui_kit::rgb(0xFF_FF_FF))
+                    .opacity((0.86 + 0.08 * swell) * opacity)
+            } else {
+                color(0.075 + 0.045 * swell)
+            };
+            chrome::fill_round(window, card.x, card.y, card.w, card.h, 10.5, fill);
+            chrome::stroke_round(
+                window,
+                card.x,
+                card.y,
+                card.w,
+                card.h,
+                10.5,
+                0.75,
+                if chrome::is_light_theme() {
+                    chrome::themed_border((0.10 + 0.06 * swell) * opacity)
+                } else {
+                    color(0.14 + 0.08 * swell)
+                },
+            );
+            let base_track = Settings::source_switch_track(base_row);
+            let sw = base_track.w * scale;
+            let sh = base_track.h * scale;
+            let track = Box4::new(
+                base_track.centre().0 - sw * 0.5 + expand_x * 0.45,
+                base_track.centre().1 - sh * 0.5,
+                sw,
+                sh,
+            );
+            let grip_w = 12.5 * scale;
+            let grip_h = 1.5 * scale;
+            let grip_gap = 4.2 * scale;
+            let grip_x = track.x - 24.0 * scale;
+            let label_x = base_row.x + 8.0 - expand_x * 0.35;
+            let label_w = (grip_x - 10.0 - label_x).max(40.0);
+            chrome::paint_text_fitted_vcentred(
+                window,
+                item.label,
+                label_x,
+                base_row.centre().1,
+                label_w,
+                12.5 * scale,
+                550.,
+                color(0.95),
+            );
+            let cy = base_row.centre().1;
+            let grip_color = color(0.66 + 0.18 * swell);
+            for dy_bar in [-grip_gap, 0.0, grip_gap] {
+                chrome::fill_round(
+                    window,
+                    grip_x,
+                    cy + dy_bar - grip_h * 0.5,
+                    grip_w,
+                    grip_h,
+                    grip_h * 0.5,
+                    grip_color,
+                );
+            }
+            let value = &p.values[item.key];
+            let on = value.as_bool().unwrap_or(false);
+            let frac = p
+                .switch_fractions
+                .get(item.key)
+                .copied()
+                .unwrap_or(if on { 1.0 } else { 0.0 });
+            let sf = choice_feedback(*i as u8);
+            chrome::paint_switch_with_accent(
+                window,
+                track.x,
+                track.y,
+                track.w,
+                track.h,
+                on,
+                frac,
+                sf,
+                p.accent_hex,
+                opacity,
+            );
         }
     }
 }

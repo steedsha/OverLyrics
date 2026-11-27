@@ -1410,18 +1410,17 @@ pub(in crate::player) fn paint_lyrics_picker_contents(
         },
     );
     if capacity > 0 && candidates.len() > capacity {
-        let track_x = panel_rect.left as f32 + panel_rect.width as f32 - 6.0;
-        let track_y = top + VERSION_HEADER + 2.0;
-        let track_h = (capacity as f32 * VERSION_ROW - 8.0).max(16.0);
-        let thumb_h = ((capacity as f32 / candidates.len() as f32) * track_h).max(18.0);
+        let track_x = panel_rect.left as f32 + panel_rect.width as f32 - 7.0;
+        let track_y = top + VERSION_HEADER + 4.0;
+        let track_h = (capacity as f32 * VERSION_ROW - 12.0).max(16.0);
+        let thumb_h = ((capacity as f32 / candidates.len() as f32) * track_h).clamp(20.0, track_h);
         let frac = if max_scroll_px > 0.5 {
             (scroll_px / max_scroll_px).clamp(0.0, 1.0)
         } else {
             0.0
         };
         let thumb_y = track_y + (track_h - thumb_h) * frac;
-        chrome::fill_round(window, track_x, track_y, 3.0, track_h, 1.5, text(0.08));
-        chrome::fill_round(window, track_x, thumb_y, 3.0, thumb_h, 1.5, text(0.32));
+        chrome::fill_round(window, track_x, thumb_y, 2.4, thumb_h, 1.2, text(0.26));
     }
     if capacity == 0 && !candidates.is_empty() {
         chrome::paint_text(window, "当前空间不足，请调大窗口或切换模式", x, top + VERSION_HEADER + 5.0, 11.0, 500.0, text(0.55));

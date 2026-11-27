@@ -37,6 +37,10 @@ impl Render for PlayerView {
             if let Some(child) = self.desktop_child.take() {
                 let _ = child.update(cx, |_, w, _| w.remove_window());
             }
+            if let Some(child) = self.tray_menu.take() {
+                let _ = child.update(cx, |_, w, _| w.remove_window());
+            }
+            self.tray = None;
             cx.quit();
         }
         if self.settings_host.is_none() {
@@ -53,8 +57,21 @@ impl Render for PlayerView {
                 });
             }
         }
+        if self.pending_settings_after_mode
+            && self.pending_mode.is_none()
+            && self.mode_transition.is_none()
+            && self.tool.mode() == Some(Mode::Lyrics)
+        {
+            self.pending_settings_after_mode = false;
+            self.pending_settings_window = Some(0);
+        }
         if let Some(page) = self.pending_settings_window.take() {
-            self.open_settings_window(page, window, cx);
+            let this = cx.entity().downgrade();
+            window.defer(cx, move |w, cx| {
+                let _ = this.update(cx, |pv, cx| {
+                    pv.open_settings_window(page, w, cx);
+                });
+            });
         }
         if self.settings_host.is_some() && !self.settings.open && !self.panel_motion[3].visible(){window.remove_window();return div().into_any_element();}
         if self.settings_host.is_none() {
@@ -247,6 +264,12 @@ impl Render for PlayerView {
         } else {
             (now - self.last_ms).clamp(0.0, 250.0)
         };
+        if self.settings_host.is_none() {
+            self.settings.has_local_lyrics = self
+                .live
+                .as_ref()
+                .is_some_and(|l| l.custom_lyrics.has_any());
+        }
         self.settings.tick(now);
         if let Some(host)=self.settings_host.as_mut(){
             if host.last_config!=self.settings.config{
@@ -1418,7 +1441,7 @@ impl Render for PlayerView {
                         chrome.scroll_thumb,
                         hovered_thumb,
                     ),
-                    if hovered_thumb { 0.62 } else { 0.36 } * lyrics_alpha,
+                    if hovered_thumb { 0.56 } else { 0.26 } * lyrics_alpha,
                 ))
             }
         } else {

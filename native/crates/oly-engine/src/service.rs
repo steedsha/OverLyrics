@@ -1411,9 +1411,13 @@ impl LyricsService {
         Some(doc)
     }
 
-    pub fn clear_source_memory(&self) {
-        Self::lock(&self.source_memory).clear();
+    pub fn clear_source_memory(&self) -> usize {
+        let mut memory = Self::lock(&self.source_memory);
+        let count = memory.len();
+        memory.clear();
+        drop(memory);
         let _ = std::fs::write(self.memory_path(), "{}");
+        count
     }
 
     pub fn clear_search_cache(&self) {

@@ -56,6 +56,15 @@ impl PlayerView {
             return (String::new(), None);
         };
         match action {
+            "action.openCustomLyricsDir" => {
+                let dir = live.custom_lyrics.root_dir().to_path_buf();
+                let _ = std::fs::create_dir_all(&dir);
+                #[cfg(windows)]
+                {
+                    let _ = std::process::Command::new("explorer.exe").arg(&dir).spawn();
+                }
+                ("已打开本地歌词保存目录".into(), None)
+            }
             "action.clearLyricsCache" => {
                 let n = live.clear_lyrics_cache();
                 (format!("已清理 {n} 项歌词缓存"), None)
@@ -65,12 +74,40 @@ impl PlayerView {
                 (format!("已清理 {n} 项封面缓存"), None)
             }
             "action.resetTrackOffsets" => {
-                if live.reset_track_offsets().is_ok() {
+                let cleared = if self.sync.has_worker() {
+                    self.sync.clear_all().is_ok()
+                } else {
+                    let _ = self.sync.clear_all();
+                    live.reset_track_offsets().is_ok()
+                };
+                if cleared {
                     self.update_sync();
                     ("已重置全部单曲偏移".into(), None)
                 } else {
                     (String::new(), None)
                 }
+            }
+            "action.clearSourceMemory" => {
+                let n = live.clear_source_memory();
+                live.search.clear_cache();
+                let current_track = live.track.clone();
+                let generation = live.model.generation();
+                if let Some(track) = current_track {
+                    live.search.request(generation, track, None);
+                }
+                self.auto_pick_persisted = false;
+                self.doc_auto_picked = false;
+                if let Some(live) = self.live.as_mut() {
+                    if live.track.is_some() {
+                        live.status = "正在按词源优先级重新选词…".into();
+                    }
+                }
+                let msg = if n > 0 {
+                    format!("已清除 {n} 条手动选词记录")
+                } else {
+                    "已清除手动选词记录".into()
+                };
+                (msg, None)
             }
             "action.resetDefaults" => {
                 if let Ok(fresh) = live.reset_all_settings() {
@@ -186,30 +223,58 @@ impl PlayerView {
             let identity=if qa_pool.is_some(){Some(("amlldb","qa-amll"))}else{self.doc_identity.as_ref().map(|(s,i)|(s.as_str(),i.as_str()))};
             let track_key=self.live.as_ref().and_then(|live|live.model.packet.as_ref()).map(|p|p.track_key()).unwrap_or_else(||if qa_pool.is_some(){"qa-track".into()}else{String::new()});
             let mut out = Vec::new();
-            if let Some(live) = self.live.as_ref() {
-                for entry in live.custom_lyrics.entries_for(&track_key) {
-                    let selected = identity.is_some_and(|(s, id)| s == "custom" && id == entry.id);
-                    out.push(PickerEntry {
-                        title: format!("{} · 本地导入", entry.file_name),
-                        subtitle: format!("{} · {} 行（右键删除）", entry.ext.to_uppercase(), entry.line_count),
-                        match_badge: String::new(),
-                        timing_badge: entry.word_timed.then_some("逐字"),
-                        has_translation: entry.has_translation,
-                        smart_translation: false,
-                        smart_translation_key: String::new(),
-                        path: PathBuf::new(),
-                        source: "custom".into(),
-                        id: entry.id.clone(),
-                        candidate_index: 0,
-                        selected,
-                    });
+            let custom_enabled = self
+                .settings
+                .config
+                .pointer("/lyrics/enabledSources/custom")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            let mut custom_rows = Vec::new();
+            if custom_enabled {
+                if let Some(live) = self.live.as_ref() {
+                    for entry in live.custom_lyrics.entries_for(&track_key) {
+                        let selected = identity.is_some_and(|(s, id)| s == "custom" && id == entry.id);
+                        custom_rows.push(PickerEntry {
+                            title: format!("{} · 本地导入", entry.file_name),
+                            subtitle: format!("{} · {} 行（右键删除）", entry.ext.to_uppercase(), entry.line_count),
+                            match_badge: String::new(),
+                            timing_badge: entry.word_timed.then_some("逐字"),
+                            has_translation: entry.has_translation,
+                            smart_translation: false,
+                            smart_translation_key: String::new(),
+                            path: PathBuf::new(),
+                            source: "custom".into(),
+                            id: entry.id.clone(),
+                            candidate_index: 0,
+                            selected,
+                        });
+                    }
                 }
             }
-            out.extend(crate::player::versions::version_rows(pool,&self.settings.config,identity).into_iter().map(|r|{
+            let online_rows: Vec<PickerEntry> = crate::player::versions::version_rows(pool,&self.settings.config,identity).into_iter().map(|r|{
                 let smart_translation_key=if track_key.is_empty(){String::new()}else{oly_contracts::config::candidate_translation_key(&track_key,&r.source,&r.id)};
                 let smart_translation=!smart_translation_key.is_empty() && crate::player::translation::translation_enabled(&self.settings.config,&smart_translation_key);
                 let match_badge = r.detail.strip_prefix("匹配 ").unwrap_or(&r.detail).to_owned();
-                PickerEntry{title:r.title,subtitle:r.subtitle,match_badge,timing_badge:r.timing_badge,has_translation:r.has_translation,smart_translation,smart_translation_key,path:PathBuf::new(),source:r.source,id:r.id,candidate_index:r.candidate_index,selected:r.selected}}));
+                PickerEntry{title:r.title,subtitle:r.subtitle,match_badge,timing_badge:r.timing_badge,has_translation:r.has_translation,smart_translation,smart_translation_key,path:PathBuf::new(),source:r.source,id:r.id,candidate_index:r.candidate_index,selected:r.selected}}).collect();
+            if custom_rows.is_empty() {
+                out = online_rows;
+            } else {
+                let order = oly_engine::picker::SortPolicy::from_config(&self.settings.config)
+                    .display_source_order(true);
+                let custom_rank = order.iter().position(|s| s == "custom").unwrap_or(0);
+                let mut inserted = false;
+                for row in online_rows {
+                    let row_rank = order.iter().position(|s| s == &row.source).unwrap_or(order.len());
+                    if !inserted && custom_rank <= row_rank {
+                        out.append(&mut custom_rows);
+                        inserted = true;
+                    }
+                    out.push(row);
+                }
+                if !inserted {
+                    out.append(&mut custom_rows);
+                }
+            }
             return out;
         }
         let Some(path)=self.cfg.fixture.as_ref() else{return Vec::new();};
@@ -652,6 +717,8 @@ impl PlayerView {
                 if is_source_row && matches!(item.control, Control::Switch) {
                     self.source_reorder_drag = Some(index as usize);
                     self.settings.source_drag = Some(index as usize);
+                    self.settings.source_drag_grab_y = y - row.centre().1;
+                    self.settings.source_drag_y = 0.0;
                     return;
                 }
                 if let Control::Segmented(options) = item.control {
@@ -718,11 +785,14 @@ impl PlayerView {
                     !current_on
                 };
                 self.change_setting(setting_key, serde_json::json!(next));
-                if drag.key == "cover:showCover" && !next {
+                if drag.key == "cover:showCover" && next != current_on {
                     self.picker_open = false;
                     self.tool.set_more_open(false);
                     self.panel_motion[0] = PanelMotion::default();
                     self.panel_motion[2] = PanelMotion::default();
+                    if !next {
+                        self.island_wake_ms = self.now_ms();
+                    }
                 }
             } else {
                 let current_on = self
@@ -752,7 +822,7 @@ impl PlayerView {
             return;
         }
         if self.source_reorder_drag.take().is_some() {
-            self.settings.source_drag = None;
+            self.settings.finish_source_drag();
             self.cancel_press();
             return;
         }
@@ -970,7 +1040,7 @@ impl PlayerView {
                     self.settings.set_kind(settings::SettingsKind::Application);
                     self.settings.set_scroll_immediate(0.0);
                     self.settings.close_choice();
-                    if matches!(self.tool.mode(),Some(Mode::Mini|Mode::Lyrics)) && self.settings_host.is_none() {
+                    if matches!(self.tool.mode(),Some(Mode::Mini|Mode::Lyrics|Mode::Album)) && self.settings_host.is_none() {
                         self.settings.open = false;
                         self.pending_settings_window = Some(0);
                     } else {
@@ -1038,12 +1108,16 @@ impl PlayerView {
             Some(Hot::CoverSwitch(i)) => {
                 let setting_key = if i == 0 { "showCover" } else { "motionCover" };
                 let current_on = self.settings.value(setting_key).as_bool().unwrap_or(true);
-                self.change_setting(setting_key, serde_json::json!(!current_on));
-                if i == 0 && current_on {
+                let next = !current_on;
+                self.change_setting(setting_key, serde_json::json!(next));
+                if i == 0 {
                     self.picker_open = false;
                     self.tool.set_more_open(false);
                     self.panel_motion[0] = PanelMotion::default();
                     self.panel_motion[2] = PanelMotion::default();
+                    if !next {
+                        self.island_wake_ms = self.now_ms();
+                    }
                 }
             }
             Some(Hot::SmartTranslation(i)) => {
@@ -1107,7 +1181,7 @@ impl PlayerView {
             }
             return;
         }
-        if let Some(cur_idx) = self.source_reorder_drag {
+        if let Some(mut cur_idx) = self.source_reorder_drag {
             if let Some(panel_rect) = self.panel_bounds.last().copied() {
                 let source_rows: Vec<(usize, Box4)> = self
                     .settings
@@ -1116,22 +1190,39 @@ impl PlayerView {
                     .filter(|(_, item, _)| item.key.starts_with("lyrics.enabledSources."))
                     .map(|(i, _, r)| (i, r))
                     .collect();
-                if let Some((target_idx, _)) = source_rows
-                    .iter()
-                    .min_by(|a, b| {
-                        (y - a.1.centre().1)
-                            .abs()
-                            .partial_cmp(&(y - b.1.centre().1).abs())
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    })
-                    .copied()
+                if let (Some(&(_, first_r)), Some(&(_, last_r))) =
+                    (source_rows.first(), source_rows.last())
                 {
-                    if target_idx != cur_idx {
+                    let min_cy = first_r.centre().1 - 8.0;
+                    let max_cy = last_r.centre().1 + 8.0;
+                    let desired_cy = (y - self.settings.source_drag_grab_y).clamp(min_cy, max_cy);
+                    if let Some(&(_, cur_r)) = source_rows.iter().find(|&&(i, _)| i == cur_idx) {
+                        let mut drag_dy = desired_cy - cur_r.centre().1;
+                        let stride = 40.0_f32;
                         let now = self.now_ms();
-                        if self.settings.move_source_order(cur_idx, target_idx, now) {
-                            self.source_reorder_drag = Some(target_idx);
-                            self.settings.source_drag = Some(target_idx);
+                        while drag_dy < -stride * 0.5 && cur_idx > 0 {
+                            let next_idx = cur_idx - 1;
+                            if self.settings.move_source_order(cur_idx, next_idx, now) {
+                                cur_idx = next_idx;
+                                self.source_reorder_drag = Some(cur_idx);
+                                self.settings.source_drag = Some(cur_idx);
+                                drag_dy += stride;
+                            } else {
+                                break;
+                            }
                         }
+                        while drag_dy > stride * 0.5 && cur_idx + 1 < source_rows.len() {
+                            let next_idx = cur_idx + 1;
+                            if self.settings.move_source_order(cur_idx, next_idx, now) {
+                                cur_idx = next_idx;
+                                self.source_reorder_drag = Some(cur_idx);
+                                self.settings.source_drag = Some(cur_idx);
+                                drag_dy -= stride;
+                            } else {
+                                break;
+                            }
+                        }
+                        self.settings.source_drag_y = drag_dy;
                     }
                 }
             }

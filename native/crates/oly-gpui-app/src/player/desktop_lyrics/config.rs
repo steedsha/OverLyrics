@@ -60,6 +60,7 @@ pub struct DesktopLyricsConfig {
     pub text_color: u32,
     pub show_translation: bool,
     pub auto_scroll: bool,
+    pub display_lines: u8,
     pub horizontal_pos: Option<(f32, f32)>,
     pub vertical_pos: Option<(f32, f32)>,
     pub horizontal_size: Option<(f32, f32)>,
@@ -75,6 +76,7 @@ impl Default for DesktopLyricsConfig {
             text_color: COLOR_PRESETS[0].0,
             show_translation: true,
             auto_scroll: true,
+            display_lines: 1,
             horizontal_pos: None,
             vertical_pos: None,
             horizontal_size: None,
@@ -111,6 +113,9 @@ impl DesktopLyricsConfig {
         }
         if let Some(ascr) = obj.get("autoScroll").and_then(|v| v.as_bool()) {
             cfg.auto_scroll = ascr;
+        }
+        if let Some(dl) = obj.get("displayLines").and_then(|v| v.as_u64()) {
+            cfg.display_lines = (dl as u8).clamp(1, 3);
         }
         let read_pos = |key: &str| -> Option<(f32, f32)> {
             let p = obj.get(key)?.as_object()?;
@@ -153,6 +158,7 @@ impl DesktopLyricsConfig {
                 "textColor": format!("#{:06X}", self.text_color & 0x00FF_FFFF),
                 "showTranslation": self.show_translation,
                 "autoScroll": self.auto_scroll,
+                "displayLines": self.display_lines.clamp(1, 3),
                 "horizontalPos": pos_json(self.horizontal_pos),
                 "verticalPos": pos_json(self.vertical_pos),
                 "horizontalSize": size_json(self.horizontal_size),

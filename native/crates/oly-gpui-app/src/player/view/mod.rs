@@ -66,7 +66,11 @@ pub struct PlayerView {
     desktop_candidates_next_ms: f64,
     pending_desktop_lyrics: bool,
     main_hwnd: Option<isize>,
+    tray: Option<super::tray::TrayService>,
+    tray_menu: Option<AnyWindowHandle>,
+    tray_bridge: Arc<super::tray::SharedTrayBridge>,
     pending_settings_window:Option<usize>,
+    pending_settings_after_mode: bool,
     sync_settings_child_config: bool,
     pending_import_rx: Option<std::sync::mpsc::Receiver<Option<PathBuf>>>,
     native_background: Option<bool>,
@@ -297,7 +301,13 @@ impl PlayerView {
         let scenario = cfg.scenario.as_deref().and_then(Scenario::named);
         let sync=SyncState::new(cfg.source==Source::Live);
         let start_idle = cfg.source == Source::Live && !cfg.settings_only;
-        let mut this = Self {settings_host:None,settings_child:None,settings_child_view:None,desktop_child:None,desktop_bridge:super::desktop_lyrics::SharedDesktopBridge::new(),desktop_candidates_cache:Arc::new(Vec::new()),desktop_candidates_next_ms:0.0,pending_desktop_lyrics:false,main_hwnd:None,pending_settings_window:None,sync_settings_child_config:false,pending_import_rx:None,native_background:None,doc_auto_picked:false,auto_pick_persisted:false,qa_frame_sample:None,smart_translation_worker:None,translation_signature:None,translated_rows:Vec::new(),search_config:None,priority_config:None,pressed_candidate:None,
+        let tray_bridge = super::tray::SharedTrayBridge::new();
+        let tray = if cfg.source == Source::Live && !cfg.settings_only {
+            Some(super::tray::TrayService::start(tray_bridge.clone()))
+        } else {
+            None
+        };
+        let mut this = Self {settings_host:None,settings_child:None,settings_child_view:None,desktop_child:None,desktop_bridge:super::desktop_lyrics::SharedDesktopBridge::new(),desktop_candidates_cache:Arc::new(Vec::new()),desktop_candidates_next_ms:0.0,pending_desktop_lyrics:false,main_hwnd:None,tray,tray_menu:None,tray_bridge:tray_bridge.clone(),pending_settings_window:None,pending_settings_after_mode:false,sync_settings_child_config:false,pending_import_rx:None,native_background:None,doc_auto_picked:false,auto_pick_persisted:false,qa_frame_sample:None,smart_translation_worker:None,translation_signature:None,translated_rows:Vec::new(),search_config:None,priority_config:None,pressed_candidate:None,
             cfg,
             focus: cx.focus_handle(),
             scene: None,
@@ -473,6 +483,30 @@ impl PlayerView {
                 "no lyric document: run with --fixture <file> to replay one. \
                  The player still draws its background, chrome and panels."
             );
+        }
+        if this.tray.is_some() {
+            let bridge = this.tray_bridge.clone();
+            let scale_factor = window.scale_factor().max(0.5);
+            cx.spawn(async move |weak, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(80))
+                        .await;
+                    if !bridge.has_pending() {
+                        continue;
+                    }
+                    let alive = weak
+                        .update(cx, |pv, cx| {
+                            pv.handle_tray_pending(scale_factor, cx);
+                            cx.notify();
+                        })
+                        .is_ok();
+                    if !alive {
+                        break;
+                    }
+                }
+            })
+            .detach();
         }
         let owner=cx.weak_entity();
         window.on_window_should_close(cx,move|_,cx|{
@@ -2308,9 +2342,10 @@ impl PlayerView {
         let page=0;
         let profile=self.settings.active_profile();
         let active_player=self.settings.active_player.clone();
+        let has_local_lyrics = self.live.as_ref().is_some_and(|l| l.custom_lyrics.has_any());
         if let Some(child)=self.settings_child {
             if child.update(cx,|_,w,_|{w.set_window_title(win_title);w.set_bounds(gpui_kit::bounds(point(px(rect.x),px(rect.y)),size(px(rect.w),px(rect.h))));w.activate_window();}).is_ok(){
-                if let Some(view)=&self.settings_child_view{let _=view.update(cx,|v,cx|{v.settings.profile=profile;v.settings.active_player=active_player;v.settings.set_kind(kind);v.settings.open=true;v.settings.page=page;v.settings.title=sheet_title;v.settings.set_scroll_immediate(0.0);v.settings.close_choice();v.sync_profile_display();cx.notify();});}
+                if let Some(view)=&self.settings_child_view{let _=view.update(cx,|v,cx|{v.settings.profile=profile;v.settings.active_player=active_player;v.settings.has_local_lyrics=has_local_lyrics;v.settings.set_kind(kind);v.settings.open=true;v.settings.page=page;v.settings.title=sheet_title;v.settings.set_scroll_immediate(0.0);v.settings.close_choice();v.sync_profile_display();cx.notify();});}
                 return;
             }
             self.settings_child=None;
@@ -2334,7 +2369,7 @@ impl PlayerView {
         match gpui_kit::open_window(options,cx,move|w,cx|cx.new(|cx|{
             let mut view=Self::new(ViewConfig{freeze_ms:Some(0.),settings_only:true,..Default::default()},w,cx);
             view.settings=store.map(Settings::with_store).unwrap_or_default();view.settings.config=config.clone();
-            view.settings.profile=profile;view.settings.display_mode_label=display_mode_label;view.settings.active_player=active_player;view.settings.set_kind(kind);view.settings.open=true;view.settings.page=page;view.settings.title=sheet_title;
+            view.settings.profile=profile;view.settings.display_mode_label=display_mode_label;view.settings.active_player=active_player;view.settings.has_local_lyrics=has_local_lyrics;view.settings.set_kind(kind);view.settings.open=true;view.settings.page=page;view.settings.title=sheet_title;
             view.settings_host=Some(SettingsHost{parent,side,last_config:config});view.playing=false;
             view.sync_profile_display();
             view.play_morph.set_target_position(0.0);view.play_morph.update(10.0);
@@ -2353,6 +2388,300 @@ impl PlayerView {
         self.desktop_child = None;
         if let Some(h) = self.main_hwnd {
             super::win32_window::set_window_visible(h, true);
+            super::tray::focus_main_hwnd(h);
+        }
+    }
+
+    pub(super) fn handle_tray_pending(&mut self, scale_factor: f32, cx: &mut Context<Self>) {
+        for ev in self.tray_bridge.drain_events() {
+            match ev {
+                super::tray::TrayEvent::ShowMain => {
+                    if let Some(h) = self.main_hwnd {
+                        super::tray::focus_main_hwnd(h);
+                    }
+                }
+                super::tray::TrayEvent::ContextMenu(sx, sy) => {
+                    self.open_tray_menu(sx, sy, scale_factor, cx);
+                }
+            }
+        }
+        for act in self.tray_bridge.drain_actions() {
+            match act {
+                super::tray::TrayAction::ShowMain => {
+                    if let Some(h) = self.main_hwnd {
+                        super::tray::focus_main_hwnd(h);
+                    }
+                }
+                super::tray::TrayAction::ToggleDesktopLyrics => {
+                    if let Some(child) = self.desktop_child.take() {
+                        let _ = child.update(cx, |_, w, _| w.remove_window());
+                        self.restore_from_desktop_lyrics();
+                    } else {
+                        self.pending_desktop_lyrics = true;
+                        if let Some(h) = self.main_hwnd {
+                            super::tray::focus_main_hwnd(h);
+                        }
+                    }
+                }
+                super::tray::TrayAction::ToggleDesktopLock => {
+                    let mut cfg = self.desktop_bridge.read_cfg();
+                    cfg.locked = !cfg.locked;
+                    self.desktop_bridge.set_cfg(cfg.clone());
+                    let patch = cfg.to_patch();
+                    if let Some(live) = self.live.as_ref() {
+                        let _ = live.config.patch(patch.clone());
+                    }
+                    if let Some(obj) = self.settings.config.as_object_mut() {
+                        if let Some(dl) = patch.get("desktopLyrics") {
+                            obj.insert("desktopLyrics".into(), dl.clone());
+                        }
+                    }
+                    self.tray_bridge.update_snapshot(super::tray::TrayMenuSnapshot {
+                        theme_mode: self.display.theme_mode,
+                        corner_radius: self.display.corner_radius,
+                        accent_hex: self.display.accent_hex,
+                        desktop_open: self.desktop_child.is_some(),
+                        desktop_locked: cfg.locked,
+                    });
+                }
+                super::tray::TrayAction::OpenSettings => {
+                    let main_visible = self.desktop_child.is_none()
+                        && self.main_hwnd.is_some_and(super::tray::is_hwnd_visible);
+                    if !main_visible {
+                        self.open_standalone_settings_window(cx);
+                    } else {
+                        if let Some(h) = self.main_hwnd {
+                            super::tray::focus_main_hwnd(h);
+                        }
+                        self.settings.set_kind(settings::SettingsKind::Application);
+                        self.settings.set_scroll_immediate(0.0);
+                        self.settings.close_choice();
+                        self.tool.set_more_open(false);
+                        self.picker_open = false;
+                        match self.tool.mode() {
+                            Some(Mode::Mini) => {
+                                self.settings.open = false;
+                                self.pending_mode = Some(1);
+                                self.pending_settings_after_mode = true;
+                            }
+                            Some(Mode::Lyrics | Mode::Album) if self.settings_host.is_none() => {
+                                self.settings.open = false;
+                                self.pending_settings_window = Some(0);
+                            }
+                            _ => {
+                                self.settings.open = true;
+                            }
+                        }
+                    }
+                }
+                super::tray::TrayAction::Quit => {
+                    self.pending_quit = true;
+                    if let Some(h) = self.main_hwnd {
+                        super::win32_window::set_window_visible(h, true);
+                    }
+                }
+            }
+        }
+    }
+
+    fn open_standalone_settings_window(&mut self, cx: &mut Context<Self>) {
+        let kind = settings::SettingsKind::Application;
+        let sheet_title = "设置";
+        let win_title = "设置 · OverLyrics";
+        let (sw, sh) = (540.0_f32, 440.0_f32);
+        let profile = self.settings.active_profile();
+        let active_player = self.settings.active_player.clone();
+        let has_local_lyrics = self.live.as_ref().is_some_and(|l| l.custom_lyrics.has_any());
+        let (dx, dy, dw, dh, display_id) = cx
+            .displays()
+            .into_iter()
+            .next()
+            .map(|d| {
+                let vb = d.visible_bounds();
+                (
+                    f32::from(vb.origin.x),
+                    f32::from(vb.origin.y),
+                    f32::from(vb.size.width),
+                    f32::from(vb.size.height),
+                    Some(d.id()),
+                )
+            })
+            .unwrap_or((0.0, 0.0, 1920.0, 1040.0, None));
+        let rx = dx + (dw - sw) * 0.5;
+        let ry = dy + (dh - sh) * 0.5;
+        if let Some(child) = self.settings_child {
+            if child
+                .update(cx, |_, w, _| {
+                    w.set_window_title(win_title);
+                    w.activate_window();
+                })
+                .is_ok()
+            {
+                if let Some(view) = &self.settings_child_view {
+                    let _ = view.update(cx, |v, cx| {
+                        v.settings.profile = profile;
+                        v.settings.active_player = active_player;
+                        v.settings.has_local_lyrics = has_local_lyrics;
+                        v.settings.set_kind(kind);
+                        v.settings.open = true;
+                        v.settings.page = 0;
+                        v.settings.title = sheet_title;
+                        v.settings.set_scroll_immediate(0.0);
+                        v.settings.close_choice();
+                        v.sync_profile_display();
+                        cx.notify();
+                    });
+                }
+                return;
+            }
+            self.settings_child = None;
+        }
+        let parent = cx.weak_entity();
+        let config = self.settings.config.clone();
+        let store = self.settings.shared_store();
+        let active_player = self.settings.active_player.clone();
+        let display_mode_label = self.settings.display_mode_label;
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(gpui_kit::bounds(
+                point(px(rx), px(ry)),
+                size(px(sw), px(sh)),
+            ))),
+            titlebar: Some(TitlebarOptions {
+                title: Some(win_title.into()),
+                appears_transparent: true,
+                ..Default::default()
+            }),
+            window_background: WindowBackgroundAppearance::Transparent,
+            is_resizable: false,
+            is_minimizable: false,
+            display_id,
+            ..Default::default()
+        };
+        if let Ok((child, entity)) = gpui_kit::open_window(options, cx, move |w, cx| {
+            cx.new(|cx| {
+                let mut view = Self::new(
+                    ViewConfig {
+                        freeze_ms: Some(0.),
+                        settings_only: true,
+                        ..Default::default()
+                    },
+                    w,
+                    cx,
+                );
+                view.settings = store.map(Settings::with_store).unwrap_or_default();
+                view.settings.config = config.clone();
+                view.settings.profile = profile;
+                view.settings.display_mode_label = display_mode_label;
+                view.settings.active_player = active_player;
+                view.settings.has_local_lyrics = has_local_lyrics;
+                view.settings.set_kind(kind);
+                view.settings.open = true;
+                view.settings.page = 0;
+                view.settings.title = sheet_title;
+                view.settings_host = Some(SettingsHost {
+                    parent,
+                    side: crate::player::details::PanelSide::Left,
+                    last_config: config,
+                });
+                view.playing = false;
+                view.sync_profile_display();
+                view.play_morph.set_target_position(0.0);
+                view.play_morph.update(10.0);
+                view
+            })
+        }) {
+            if let Some(root) = child.downcast::<gpui_kit::base::Root>() {
+                let _ = root.update(cx, |r, _, cx| {
+                    r.style().background = Some(gpui_kit::transparent_black().into());
+                    cx.notify();
+                });
+            }
+            self.settings_child = Some(child);
+            self.settings_child_view = Some(entity.downgrade());
+        }
+    }
+
+    fn open_tray_menu(&mut self, screen_x: i32, screen_y: i32, scale_factor: f32, cx: &mut Context<Self>) {
+        if let Some(old) = self.tray_menu.take() {
+            let _ = old.update(cx, |_, w, _| w.remove_window());
+        }
+        let dcfg = self.desktop_bridge.read_cfg();
+        let desktop_open = self.desktop_child.is_some();
+        self.tray_bridge.update_snapshot(super::tray::TrayMenuSnapshot {
+            theme_mode: self.display.theme_mode,
+            corner_radius: self.display.corner_radius,
+            accent_hex: self.display.accent_hex,
+            desktop_open,
+            desktop_locked: dcfg.locked,
+        });
+        let (pw, ph) = super::tray::TrayMenuPopover::window_size(desktop_open);
+        let lx = screen_x as f32 / scale_factor.max(0.5);
+        let ly = screen_y as f32 / scale_factor.max(0.5);
+        let mut chosen_display = None;
+        let mut work = (0.0_f32, 0.0_f32, 1920.0_f32, 1040.0_f32);
+        for d in cx.displays() {
+            let vb = d.visible_bounds();
+            let b = d.bounds();
+            let (bx, by, bw, bh) = (
+                f32::from(b.origin.x),
+                f32::from(b.origin.y),
+                f32::from(b.size.width),
+                f32::from(b.size.height),
+            );
+            let (vx, vy, vw, vh) = (
+                f32::from(vb.origin.x),
+                f32::from(vb.origin.y),
+                f32::from(vb.size.width),
+                f32::from(vb.size.height),
+            );
+            if chosen_display.is_none() {
+                chosen_display = Some(d.id());
+                work = (vx, vy, vw, vh);
+            }
+            if lx >= bx && lx <= bx + bw && ly >= by && ly <= by + bh {
+                chosen_display = Some(d.id());
+                work = (vx, vy, vw, vh);
+                break;
+            }
+        }
+        let (dx, dy, dw, dh) = work;
+        let px_pos = (lx - pw * 0.5).clamp(dx + 6.0, (dx + dw - pw - 6.0).max(dx + 6.0));
+        let py_pos = if ly - ph - 6.0 >= dy + 6.0 {
+            ly - ph - 6.0
+        } else {
+            (ly + 6.0).clamp(dy + 6.0, (dy + dh - ph - 6.0).max(dy + 6.0))
+        };
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(gpui_kit::bounds(
+                point(px(px_pos), px(py_pos)),
+                size(px(pw), px(ph)),
+            ))),
+            titlebar: Some(TitlebarOptions {
+                title: Some("OverLyrics Tray Menu".into()),
+                appears_transparent: true,
+                traffic_light_position: None,
+            }),
+            window_background: WindowBackgroundAppearance::Transparent,
+            is_resizable: false,
+            is_minimizable: false,
+            focus: true,
+            display_id: chosen_display,
+            ..Default::default()
+        };
+        let bridge = self.tray_bridge.clone();
+        if let Ok((child, _)) =
+            gpui_kit::open_window(options, cx, move |_, cx| cx.new(|_| super::tray::TrayMenuPopover::new(bridge)))
+        {
+            if let Some(root) = child.downcast::<gpui_kit::base::Root>() {
+                let _ = root.update(cx, |r, w, cx| {
+                    r.style().background = Some(gpui_kit::transparent_black().into());
+                    if let Some(h) = super::win32_window::hwnd_from_window(w) {
+                        super::win32_window::configure_desktop_overlay(h);
+                    }
+                    cx.notify();
+                });
+            }
+            self.tray_menu = Some(child);
         }
     }
 
@@ -2492,6 +2821,38 @@ impl PlayerView {
             Some((idx, r)) => (Some(idx), Some(r.clone())),
             None => (None, None),
         };
+        let max_lines = self.desktop_bridge.read_cfg().display_lines.clamp(1, 3) as usize;
+        let mut display_rows: Vec<(usize, Row)> = Vec::new();
+        if let Some(active_idx) = active_row_index {
+            if max_lines <= 1 {
+                if let Some(r) = self.rows.get(active_idx) {
+                    display_rows.push((active_idx, r.clone()));
+                }
+            } else {
+                // Multi-line mode supports harmony (`is_bg`) rows alongside lead vocals.
+                for idx in active_idx..self.rows.len() {
+                    let r = &self.rows[idx];
+                    if r.text.trim().is_empty() {
+                        continue;
+                    }
+                    display_rows.push((idx, r.clone()));
+                    if display_rows.len() >= max_lines {
+                        break;
+                    }
+                }
+                if display_rows.len() < max_lines {
+                    let mut back_idx = active_idx;
+                    while display_rows.len() < max_lines && back_idx > 0 {
+                        back_idx -= 1;
+                        let r = &self.rows[back_idx];
+                        if r.text.trim().is_empty() {
+                            continue;
+                        }
+                        display_rows.insert(0, (back_idx, r.clone()));
+                    }
+                }
+            }
+        }
         let (track_title, track_artist) = self
             .live
             .as_ref()
@@ -2541,6 +2902,7 @@ impl PlayerView {
                 position_ms: pos,
                 active_row,
                 active_row_index,
+                display_rows,
                 interlude_range,
                 sync_offset_ms: self.sync.offset_ms(),
                 volume_pct,
@@ -2845,10 +3207,31 @@ impl PlayerView {
     }
 
     fn panel_rect(&self, anchor: Box4, size: (f64, f64), viewport: (f64, f64)) -> (GlassRect, Side) {
-        let preferred = if (anchor.y as f64) >= size.1 + 16.0 || (anchor.y as f64) >= viewport.1 * 0.4 {
+        let valid_anchor = anchor.w > 1.0 && anchor.h > 1.0;
+        let anchor = if valid_anchor {
+            anchor
+        } else {
+            let aw = 34.0_f32;
+            let ah = 34.0_f32;
+            if self.tool.mode() == Some(Mode::Window) && !self.display.show_cover {
+                Box4::new((viewport.0 as f32) * 0.5 + 180.0, 24.0, aw, ah)
+            } else {
+                Box4::new(
+                    ((viewport.0 as f32) * 0.5 - aw * 0.5).max(16.0),
+                    ((viewport.1 as f32) - 72.0).max(24.0),
+                    aw,
+                    ah,
+                )
+            }
+        };
+        let space_below = viewport.1 - (anchor.bottom() as f64) - 16.0;
+        let space_above = (anchor.y as f64) - 16.0;
+        let preferred = if (anchor.y as f64) < viewport.1 * 0.32 && space_below >= size.1 {
+            Some(Side::Below)
+        } else if space_above >= size.1 || space_above >= space_below {
             Some(Side::Above)
         } else {
-            None
+            Some(Side::Below)
         };
         place_popover(
             GlassRect {

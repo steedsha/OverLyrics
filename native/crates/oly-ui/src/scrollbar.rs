@@ -7,7 +7,7 @@ pub fn hit(track: Box4, thumb: Box4) -> Box4 {
 }
 
 pub fn rest_line(track: Box4, thumb: Box4, hovered: bool) -> Box4 {
-    let w = if hovered { 3.5 } else { 2.5 };
+    let w = if hovered { 3.6 } else { 2.2 };
     Box4::new(track.x + (track.w - w) * 0.5, thumb.y, w, thumb.h)
 }
 
@@ -41,7 +41,7 @@ mod tests {
         let track = Box4::new(100., 20., 4., 300.);
         let thumb = Box4::new(98., 40., 8., 60.);
         let line = rest_line(track, thumb, false);
-        assert_eq!(line.w, 2.5);
+        assert_eq!(line.w, 2.2);
         let held = held_shape(60., 1.0, [0., 0.]);
         assert!(held.w > line.w * 3. && held.right() < 32.);
     }

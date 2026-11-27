@@ -54,6 +54,11 @@ pub struct Settings {
     status_at_ms: Option<f64>,
     last_status: String,
     pub source_drag: Option<usize>,
+    pub source_drag_swell: f32,
+    pub source_drag_y: f32,
+    pub source_drag_grab_y: f32,
+    pub source_row_offsets: std::collections::HashMap<&'static str, (f32, f32)>,
+    pub has_local_lyrics: bool,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -105,6 +110,11 @@ impl Default for Settings {
             status_at_ms: None,
             last_status: String::new(),
             source_drag: None,
+            source_drag_swell: 0.0,
+            source_drag_y: 0.0,
+            source_drag_grab_y: 0.0,
+            source_row_offsets: std::collections::HashMap::new(),
+            has_local_lyrics: false,
         }
     }
 }
@@ -191,6 +201,14 @@ impl Settings {
                 .filter_map(|id| Self::source_item_for(id))
                 .collect();
             rows.splice(0..0, source_rows);
+            if self.has_local_lyrics {
+                if let Some(pos) = rows.iter().position(|item| item.key == "lyrics.lyricsCacheMB") {
+                    rows.insert(
+                        pos + 1,
+                        action("action.openCustomLyricsDir", "本地歌词保存路径", "打开目录", false),
+                    );
+                }
+            }
             let aliases = self.artist_aliases();
             if !aliases.is_empty() {
                 let insert_at = rows.len().saturating_sub(1);
@@ -249,12 +267,29 @@ impl Settings {
         rows
     }
     pub fn source_order(&self) -> Vec<String> {
-        oly_engine::picker::SortPolicy::from_config(&self.config).source_order
+        oly_engine::picker::SortPolicy::from_config(&self.config)
+            .display_source_order(self.has_local_lyrics)
     }
     pub fn move_source_order(&mut self, from: usize, to: usize, now: f64) -> bool {
         let mut order = self.source_order();
         if from >= order.len() || to >= order.len() || from == to {
             return false;
+        }
+        let stride = 40.0_f32;
+        if to < from {
+            for idx in to..from {
+                if let Some(item) = Self::source_item_for(&order[idx]) {
+                    let entry = self.source_row_offsets.entry(item.key).or_insert((0.0, 0.0));
+                    entry.0 -= stride;
+                }
+            }
+        } else {
+            for idx in (from + 1)..=to {
+                if let Some(item) = Self::source_item_for(&order[idx]) {
+                    let entry = self.source_row_offsets.entry(item.key).or_insert((0.0, 0.0));
+                    entry.0 += stride;
+                }
+            }
         }
         let item = order.remove(from);
         order.insert(to, item);
@@ -262,8 +297,23 @@ impl Settings {
         self.set("lyrics.sourceOrder", val, now, true);
         true
     }
+    pub fn finish_source_drag(&mut self) {
+        if let Some(idx) = self.source_drag.take() {
+            if let Some(id) = self.source_order().get(idx).cloned() {
+                if let Some(item) = Self::source_item_for(&id) {
+                    if self.source_drag_y.abs() > 0.2 {
+                        let entry = self.source_row_offsets.entry(item.key).or_insert((0.0, 0.0));
+                        entry.0 += self.source_drag_y;
+                    }
+                }
+            }
+        }
+        self.source_drag_y = 0.0;
+        self.source_drag_grab_y = 0.0;
+    }
     fn source_item_for(id: &str) -> Option<Item> {
         match id {
+            "custom" => Some(toggle("lyrics.enabledSources.custom", "本地歌词")),
             "amlldb" => Some(toggle("lyrics.enabledSources.amlldb", "AMLL 歌词库")),
             "qq" => Some(toggle("lyrics.enabledSources.qq", "QQ 音乐")),
             "kugou" => Some(toggle("lyrics.enabledSources.kugou", "酷狗音乐")),
@@ -273,9 +323,7 @@ impl Settings {
         }
     }
     pub fn source_switch_track(row: Box4) -> Box4 {
-        let mut track = crate::player::details::switch_track(row);
-        track.x -= 26.0;
-        track
+        crate::player::details::switch_track(row)
     }
     pub fn saved_player_offsets(&self) -> Vec<String> {
         let mut out: Vec<String> = self
@@ -402,6 +450,9 @@ impl Settings {
             || self.switch_springs.values().any(|s| !s.arrived())
             || !self.scroll_spring.arrived()
             || !self.choice_scroll_spring.arrived()
+            || self.source_drag.is_some()
+            || self.source_drag_swell > 0.004
+            || !self.source_row_offsets.is_empty()
     }
     pub fn value(&self, key: &str) -> Value {
         let resolved = self.resolve_key(key);
@@ -1105,6 +1156,25 @@ impl Settings {
                 self.outgoing_page = None;
             }
         }
+        let drag_target = if self.source_drag.is_some() { 1.0 } else { 0.0 };
+        self.source_drag_swell = super::model::step_opacity(
+            self.source_drag_swell,
+            drag_target,
+            dt_ms,
+            if drag_target > 0.5 { 150.0 } else { 200.0 },
+            false,
+        );
+        if !self.source_row_offsets.is_empty() {
+            let dt_s = (dt_ms as f32 / 1000.0).clamp(0.0, 0.05);
+            let stiffness = 145.0_f32;
+            let damping = 23.0_f32;
+            self.source_row_offsets.retain(|_, (pos, vel)| {
+                let acc = -stiffness * *pos - damping * *vel;
+                *vel += acc * dt_s;
+                *pos += *vel * dt_s;
+                pos.abs() > 0.12 || vel.abs() > 0.5
+            });
+        }
         if self.pending() && now >= self.deadline {
             let patch = std::mem::replace(&mut self.pending, json!({}));
             self.status = match &self.store {
@@ -1321,7 +1391,7 @@ impl Settings {
             "fontFamily" => Some("字体"),
             "enableSpring" => Some("动效"),
             "idleLineOpacity" => Some("亮度与羽化"),
-            "lyrics.enabledSources.kugou" => Some("在线歌词源"),
+            "lyrics.enabledSources.kugou" => Some("歌词来源"),
             "lyrics.matchThreshold" => Some("匹配与缓存"),
             "lyrics.autoTranslate" => Some("翻译"),
             "lyrics.playerSyncOffsets.apple" => Some("播放器同步"),
@@ -1344,7 +1414,7 @@ impl Settings {
             let header = if item.key.starts_with("lyrics.enabledSources.") {
                 if !has_sources_header {
                     has_sources_header = true;
-                    Some("在线歌词源")
+                    Some("歌词来源")
                 } else {
                     None
                 }

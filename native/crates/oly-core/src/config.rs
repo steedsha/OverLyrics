@@ -206,6 +206,7 @@ impl ConfigStore {
             ("display", "lyricGapUnitMigrated"),
             ("display", "innerGapAnchorMigrated"),
             ("lyrics", "sourcesPruned"),
+            ("lyrics", "appleOffset0Migrated"),
         ] {
             if let Some(value) = prev.get(section).and_then(|s| s.get(key)) {
                 if value.as_bool() == Some(true) || value.as_u64().is_some() {
@@ -601,6 +602,22 @@ fn migrate(doc: &mut Value, saved: &Value) {
                     lyrics.insert("matchThreshold".into(), Value::from(v.round()));
                 }
             }
+        }
+
+        if lyrics.get("appleOffset0Migrated") != Some(&Value::Bool(true)) {
+            let saved_apple = saved
+                .get("lyrics")
+                .and_then(|l| l.get("playerSyncOffsets"))
+                .and_then(|p| p.get("apple"));
+            if as_num(saved_apple) == Some(-600.0) {
+                if let Some(offsets) = lyrics
+                    .get_mut("playerSyncOffsets")
+                    .and_then(|p| p.as_object_mut())
+                {
+                    offsets.insert("apple".into(), Value::from(0));
+                }
+            }
+            lyrics.insert("appleOffset0Migrated".into(), Value::Bool(true));
         }
 
         remove_keys(Some(lyrics), DEAD_LYRICS_KEYS);

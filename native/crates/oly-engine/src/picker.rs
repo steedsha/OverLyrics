@@ -52,12 +52,14 @@ impl Default for SortPolicy {
 }
 
 impl SortPolicy {
-    /// Normalize a configured source order so every known source appears once.
+    /// Normalize a configured source order so every known online source appears once.
+    /// If `"custom"` (local lyrics) is present in `raw`, its relative position is preserved.
     pub fn normalize_source_order(raw: &[String]) -> Vec<String> {
-        let mut out = Vec::with_capacity(DEFAULT_SOURCE_ORDER.len());
+        let mut out = Vec::with_capacity(DEFAULT_SOURCE_ORDER.len() + 1);
         for id in raw {
             let norm = canonical_source_id(id);
-            if DEFAULT_SOURCE_ORDER.contains(&norm) && !out.iter().any(|s: &String| s == norm) {
+            let allowed = norm == "custom" || DEFAULT_SOURCE_ORDER.contains(&norm);
+            if allowed && !out.iter().any(|s: &String| s == norm) {
                 out.push(norm.to_string());
             }
         }
@@ -65,6 +67,24 @@ impl SortPolicy {
             if !out.iter().any(|s| s == id) {
                 out.push(id.to_string());
             }
+        }
+        out
+    }
+
+    /// Returns the source order for UI display, conditionally including `"custom"`
+    /// (defaulting to the very top when not yet ordered) only when `include_local` is true.
+    pub fn display_source_order(&self, include_local: bool) -> Vec<String> {
+        if !include_local {
+            return self
+                .source_order
+                .iter()
+                .filter(|id| id.as_str() != "custom")
+                .cloned()
+                .collect();
+        }
+        let mut out = self.source_order.clone();
+        if !out.iter().any(|id| id == "custom") {
+            out.insert(0, "custom".to_string());
         }
         out
     }

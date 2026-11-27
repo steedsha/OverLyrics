@@ -9,6 +9,7 @@ pub(in crate::player) struct DesktopSnapshot {
     pub position_ms: f64,
     pub active_row: Option<Row>,
     pub active_row_index: Option<usize>,
+    pub display_rows: Vec<(usize, Row)>,
     pub interlude_range: Option<(f64, f64)>,
     pub sync_offset_ms: i64,
     pub volume_pct: f64,
@@ -29,6 +30,7 @@ impl Default for DesktopSnapshot {
             position_ms: 0.0,
             active_row: None,
             active_row_index: None,
+            display_rows: Vec::new(),
             interlude_range: None,
             sync_offset_ms: 0,
             volume_pct: 100.0,
@@ -64,8 +66,13 @@ pub enum PopoverAction {
     FontDelta(f32),
     SetColor(u32),
     ToggleAutoScroll,
+    SetDisplayLines(u8),
+    OpenDisplayPopover(Box4, f32),
+    CloseDisplayPopover,
     OpenColorPopover(Box4, f32),
     CloseColorPopover,
+    OpenLinesPopover(Box4, f32),
+    CloseLinesPopover,
     OpenLyricsPicker,
     ReturnToMain,
 }
@@ -76,12 +83,18 @@ pub struct SharedDesktopBridge {
     commands: Mutex<Vec<DesktopCommand>>,
     cfg: Mutex<DesktopLyricsConfig>,
     popover_actions: Mutex<Vec<PopoverAction>>,
+    pub display_popover_open: AtomicBool,
+    pub display_popover_side: AtomicI8,
     pub color_popover_open: AtomicBool,
     /// `0` = closed, `1` = opened on right side, `-1` = opened on left side.
     pub color_popover_side: AtomicI8,
+    pub lines_popover_open: AtomicBool,
+    pub lines_popover_side: AtomicI8,
     volume_closed_at: Mutex<Option<Instant>>,
     more_closed_at: Mutex<Option<Instant>>,
+    display_closed_at: Mutex<Option<Instant>>,
     color_closed_at: Mutex<Option<Instant>>,
+    lines_closed_at: Mutex<Option<Instant>>,
 }
 
 impl SharedDesktopBridge {
@@ -110,10 +123,22 @@ impl SharedDesktopBridge {
         Self::mark_closed(&self.more_closed_at);
     }
 
+    pub fn mark_display_closed(&self) {
+        self.display_popover_open.store(false, Ordering::SeqCst);
+        self.display_popover_side.store(0, Ordering::SeqCst);
+        Self::mark_closed(&self.display_closed_at);
+    }
+
     pub fn mark_color_closed(&self) {
         self.color_popover_open.store(false, Ordering::SeqCst);
         self.color_popover_side.store(0, Ordering::SeqCst);
         Self::mark_closed(&self.color_closed_at);
+    }
+
+    pub fn mark_lines_closed(&self) {
+        self.lines_popover_open.store(false, Ordering::SeqCst);
+        self.lines_popover_side.store(0, Ordering::SeqCst);
+        Self::mark_closed(&self.lines_closed_at);
     }
 
     pub fn was_volume_recently_closed(&self) -> bool {
@@ -124,8 +149,16 @@ impl SharedDesktopBridge {
         Self::take_recently_closed(&self.more_closed_at, 260)
     }
 
+    pub fn was_display_recently_closed(&self) -> bool {
+        Self::take_recently_closed(&self.display_closed_at, 260)
+    }
+
     pub fn was_color_recently_closed(&self) -> bool {
         Self::take_recently_closed(&self.color_closed_at, 260)
+    }
+
+    pub fn was_lines_recently_closed(&self) -> bool {
+        Self::take_recently_closed(&self.lines_closed_at, 260)
     }
 
     pub fn push(&self, cmd: DesktopCommand) {

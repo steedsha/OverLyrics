@@ -46,7 +46,7 @@ pub const LONG_MIN: f32 = 560.0;
 pub const LONG_MAX: f32 = 1600.0;
 pub const SHORT_DEFAULT: f32 = 144.0;
 pub const SHORT_MIN: f32 = 120.0;
-pub const SHORT_MAX: f32 = 320.0;
+pub const SHORT_MAX: f32 = 480.0;
 
 pub const HORIZ_W: f32 = LONG_DEFAULT;
 pub const HORIZ_H: f32 = SHORT_DEFAULT;
@@ -167,6 +167,7 @@ mod tests {
             text_color: 0xCBEAFF,
             show_translation: false,
             auto_scroll: false,
+            display_lines: 3,
             horizontal_pos: Some((120.0, 900.0)),
             vertical_pos: Some((1740.0, 180.0)),
             horizontal_size: Some((960.0, 180.0)),
@@ -201,6 +202,29 @@ mod tests {
         let (x3, sx3) = snap_axis(505.0, 960.0, 0.0, 1920.0, true);
         assert!(!sx3);
         assert!((x3 - 505.0).abs() < 0.01);
+    }
+
+    #[::std::prelude::v1::test]
+    fn snap_edges_magnetize_gently_and_allow_overhang_past_threshold() {
+        let (lx, ls) = snap_axis(9.0, 800.0, 0.0, 1920.0, false);
+        assert!(ls);
+        assert!((lx - 0.0).abs() < 0.01);
+
+        let (lx_hold, ls_hold) = snap_axis(-14.0, 800.0, 0.0, 1920.0, true);
+        assert!(ls_hold);
+        assert!((lx_hold - 0.0).abs() < 0.01);
+
+        let (lx_free, ls_free) = snap_axis(-28.0, 800.0, 0.0, 1920.0, true);
+        assert!(!ls_free);
+        assert!((lx_free - (-28.0)).abs() < 0.01);
+
+        let (rx, rs) = snap_axis(1111.0, 800.0, 0.0, 1920.0, false);
+        assert!(rs);
+        assert!((rx - 1120.0).abs() < 0.01);
+
+        let (rx_free, rs_free) = snap_axis(1145.0, 800.0, 0.0, 1920.0, true);
+        assert!(!rs_free);
+        assert!((rx_free - 1145.0).abs() < 0.01);
     }
 
     #[::std::prelude::v1::test]
