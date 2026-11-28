@@ -9,7 +9,7 @@
   <p>
     <img src="https://img.shields.io/badge/Platform-Windows%2010%2F11-0078D4?style=flat-square" alt="Windows" />
     <img src="https://img.shields.io/badge/Stack-Rust%20%2B%20GPUI%20%2B%20D3D11-orange?style=flat-square" alt="Rust + GPUI + D3D11" />
-    <img src="https://img.shields.io/badge/Version-v1.1.0-brightgreen?style=flat-square" alt="v1.1.0" />
+    <img src="https://img.shields.io/badge/Version-v1.2.0-brightgreen?style=flat-square" alt="v1.2.0" />
     <img src="https://img.shields.io/badge/License-AGPL--3.0-blue?style=flat-square" alt="AGPL-3.0" />
   </p>
 </div>
@@ -19,19 +19,19 @@
 ## 界面预览
 
 <p align="center">
-  <img src="docs/images/preview-1.jpg" width="49%" alt="OverLyrics 沉浸背景预览 1" />
-  <img src="docs/images/preview-2.jpg" width="49%" alt="OverLyrics 沉浸背景预览 2" />
+  <img src="docs/images/preview-1.png" width="49%" alt="OverLyrics 界面预览 1" />
+  <img src="docs/images/preview-2.png" width="49%" alt="OverLyrics 界面预览 2" />
 </p>
 
 ## 核心特性
 
-- **液体玻璃视觉与三种主题**：DirectWrite 文本排版配合 Direct3D 11 实时着色器，提供「液体玻璃 / 浅色 / 深色」三种主题配色与可自定义圆角、强调色。
-- **沉浸动态背景与鼓点律动**：基于 OKLCH / Oklab 色彩空间提取专辑封面色调流，并支持 WASAPI 音频捕获，可按需开启边缘光晕闪光与色团律动响应。
-- **多词源聚合与本地导入**：支持 **AMLL 歌词库（TTML）**、**酷狗音乐**、**网易云音乐**、**QQ 音乐**、**LRCLIB**，支持版本手动切换与本地 `.lrc` / `.ttml` / `.qrc` / `.yrc` / `.txt` 拖拽导入。
-- **独立桌面歌词（横排 / 竖排）**：无边框置顶透明桌面歌词，支持自定义拖边缩放、自动吸附停靠控制栏、长句滚动/自适应缩放、锁定穿透（`Ctrl+L`）、二级颜色菜单与自定义 HSV 调色板。
-- **四种窗口形态**：支持 **迷你 / 封面 / 歌词 / 窗口**（含全屏展示）四种模式及 Windows SMTC 多媒体会话切换，满足桌面常驻与全屏沉浸等不同场景。
-- **逐字动效与双语翻译**：支持逐字扫光、长音微光与上浮强调、和声副歌行，内置免费翻译与可配置 AI 翻译。
-- **单文件绿色运行与自动更新**：Release 产物静态链接运行库并内嵌字体与图标资源，单个 `overlyrics.exe` 双击即用，支持内置检查与一键自更新。
+- **液体玻璃**：DirectWrite 文本排版配合 Direct3D 11 实时着色器，提供「液体玻璃 / 浅色 / 深色」三种主题与可自定义圆角、强调色。
+- **动态背景**：基于 OKLCH 色彩空间实时提取专辑封面色流（支持动态封面），并可通过 WASAPI 音频捕获响应音乐鼓点。
+- **多种形态**：支持 **迷你 / 封面 / 歌词 / 窗口（含全屏）** 四种窗口形态，以及将封面与歌词直接融入桌面的 **沉浸式壁纸模式**（附极简悬浮控制条）。
+- **桌面歌词**：无边框置顶透明桌面歌词，支持横/竖排、单行与多行、和声副歌、间奏呼吸灯与锁定鼠标穿透（`Ctrl+L`）。
+- **多源离线**：聚合 **AMLL（TTML）**、**QQ 音乐**、**酷狗**、**网易云**、**LRCLIB**，支持手动切源、本地歌词目录自动扫描匹配与文件拖拽导入（`.ttml` / `.lrc` / `.qrc` / `.yrc` / `.txt`）。
+- **逐字翻译**：支持逐字扫光、长音微光上浮强调、和声与双人对唱排版，内置免费翻译及可配置 AI 翻译。
+- **开箱即用**：内嵌「Pretendard」与「檎风黑体 CHS」双字体，单个 `overlyrics.exe` 绿色运行，支持内置检查与一键自更新。
 
 ## 快速开始
 

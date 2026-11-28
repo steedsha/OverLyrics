@@ -9,7 +9,7 @@
   <p>
     <img src="https://img.shields.io/badge/Platform-Windows%2010%2F11-0078D4?style=flat-square" alt="Windows" />
     <img src="https://img.shields.io/badge/Stack-Rust%20%2B%20GPUI%20%2B%20D3D11-orange?style=flat-square" alt="Rust + GPUI + D3D11" />
-    <img src="https://img.shields.io/badge/Version-v1.1.0-brightgreen?style=flat-square" alt="v1.1.0" />
+    <img src="https://img.shields.io/badge/Version-v1.2.0-brightgreen?style=flat-square" alt="v1.2.0" />
     <img src="https://img.shields.io/badge/License-AGPL--3.0-blue?style=flat-square" alt="AGPL-3.0" />
   </p>
 </div>
@@ -19,19 +19,19 @@
 ## Preview
 
 <p align="center">
-  <img src="docs/images/preview-1.jpg" width="49%" alt="OverLyrics Immersion Preview 1" />
-  <img src="docs/images/preview-2.jpg" width="49%" alt="OverLyrics Immersion Preview 2" />
+  <img src="docs/images/preview-1.png" width="49%" alt="OverLyrics Preview 1" />
+  <img src="docs/images/preview-2.png" width="49%" alt="OverLyrics Preview 2" />
 </p>
 
 ## Features
 
-- **Liquid Glass UI & Three Themes**: DirectWrite text shaping paired with Direct3D 11 shaders, offering `Liquid Glass`, `Light`, and `Dark` themes with customizable corner radii and accent colors.
-- **Immersion Backdrop & Beat Response**: OKLCH/Oklab palette extraction from album artwork with optional WASAPI audio capture for subtle edge beat-flash and elastic blob motion.
-- **Multi-Source Lyrics & Local Import**: Supports **AMLL TTML DB**, **Kugou**, **NetEase Cloud Music**, **QQ Music**, and **LRCLIB**, plus manual version switching and local `.lrc` / `.ttml` / `.qrc` / `.yrc` / `.txt` drag-and-drop import.
-- **Standalone Desktop Lyrics (Horizontal & Vertical)**: Borderless always-on-top transparent overlay with resizable edges, elastic hover controls, long-line scrolling / auto-fit, click-through lock (`Ctrl+L`), and a secondary color popover with a custom HSV palette.
-- **Four Window Modes**: Switch between `Mini`, `Album`, `Lyrics`, and `Window` (including fullscreen) with Windows SMTC media session switching.
-- **Word-by-Word Motion & Translation**: Per-syllable sweep, held-note glow & lift emphasis, harmony/background lines, and built-in free or configurable AI translation.
-- **Single-File Binary & Auto-Update**: Statically linked CRT with embedded icon and font fallback — download `overlyrics.exe` and run directly, with built-in update checking and one-click self-update.
+- **Liquid Glass**: DirectWrite text shaping paired with Direct3D 11 shaders, offering `Liquid Glass`, `Light`, and `Dark` themes with customizable corner radii and accent colors.
+- **Dynamic Backdrop**: Real-time OKLCH palette flow extracted from album artwork (with motion cover support) and optional WASAPI audio capture for subtle beat response.
+- **Flexible Modes**: Switch between `Mini`, `Album`, `Lyrics`, and `Window` (including fullscreen), plus an immersive **Wallpaper Mode** that integrates cover art and lyrics into your desktop with a minimalist floating control bar.
+- **Desktop Lyrics**: Borderless always-on-top transparent overlay supporting horizontal and vertical layouts, single/multi-line display, harmony rows, interlude dots, and click-through lock (`Ctrl+L`).
+- **Multi-Source & Offline**: Aggregates **AMLL TTML DB**, **QQ Music**, **Kugou**, **NetEase Cloud Music**, and **LRCLIB**, with manual version switching, automatic local lyrics folder matching, and drag-and-drop import (`.ttml` / `.lrc` / `.qrc` / `.yrc` / `.txt`).
+- **Word Motion & Translation**: Per-syllable sweep, held-note glow and lift emphasis, harmony and duet layouts, plus built-in free and configurable AI translation.
+- **Portable & Auto-Update**: Bundles `Pretendard` and `Qinfeng Hei CHS` fonts inside a single portable `overlyrics.exe` with built-in update checks and one-click self-update.
 
 ## Quick Start
 
