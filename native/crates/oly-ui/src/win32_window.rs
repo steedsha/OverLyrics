@@ -47,6 +47,37 @@ pub fn hwnd_from_window(window: &gpui_kit::Window) -> Option<isize> {
     }
 }
 
+/// Returns `true` only when the cursor is directly over `hwnd` and NOT occluded
+/// by another window in front of it (e.g. Settings or another application).
+pub fn is_cursor_directly_over_hwnd(hwnd: isize) -> bool {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        use windows::Win32::Foundation::POINT;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GA_ROOT, GetAncestor, GetCursorPos, WindowFromPoint,
+        };
+        if hwnd == 0 {
+            return false;
+        }
+        let mut pt = POINT::default();
+        if GetCursorPos(&mut pt).is_err() {
+            return false;
+        }
+        let under = WindowFromPoint(pt);
+        if under.0.is_null() {
+            return false;
+        }
+        let root = GetAncestor(under, GA_ROOT);
+        let top = if root.0.is_null() { under } else { root };
+        top.0 as isize == hwnd
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = hwnd;
+        false
+    }
+}
+
 pub fn set_always_on_top(hwnd: isize, on_top: bool) {
     #[cfg(target_os = "windows")]
     unsafe {
@@ -126,6 +157,43 @@ pub fn disable_dwm_corners_and_border(hwnd: isize) {
 
 /// Configures a GPUI transparent window as a borderless, taskbar-hidden, topmost desktop lyrics overlay.
 pub fn configure_desktop_overlay(hwnd: isize) {
+    configure_desktop_overlay_zorder(hwnd, true);
+}
+
+/// Opts this process out of Windows 11 background EcoQoS and timer-resolution coalescing
+/// so borderless transparent overlays (desktop lyrics, wallpaper bar) keep native VSync
+/// smoothness even when the main window is hidden and the cursor is outside the overlay.
+pub fn disable_background_power_throttling() {
+    #[cfg(target_os = "windows")]
+    {
+        use std::sync::Once;
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| unsafe {
+            use windows::Win32::System::Threading::{
+                GetCurrentProcess, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+                PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+                PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION,
+                PROCESS_POWER_THROTTLING_STATE, ProcessPowerThrottling, SetProcessInformation,
+            };
+            let state = PROCESS_POWER_THROTTLING_STATE {
+                Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+                ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED
+                    | PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION,
+                StateMask: 0,
+            };
+            let _ = SetProcessInformation(
+                GetCurrentProcess(),
+                ProcessPowerThrottling,
+                (&state as *const PROCESS_POWER_THROTTLING_STATE).cast(),
+                std::mem::size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
+            );
+        });
+    }
+}
+
+/// Configures a GPUI transparent window as a borderless, taskbar-hidden overlay with configurable Z-order.
+pub fn configure_desktop_overlay_zorder(hwnd: isize, topmost: bool) {
+    disable_background_power_throttling();
     #[cfg(target_os = "windows")]
     unsafe {
         if hwnd == 0 {
@@ -152,9 +220,10 @@ pub fn configure_desktop_overlay(hwnd: isize) {
             std::mem::size_of_val(&border) as u32,
         );
 
+        let insert_after = if topmost { HWND_TOPMOST } else { HWND_NOTOPMOST };
         let _ = SetWindowPos(
             h,
-            Some(HWND_TOPMOST),
+            Some(insert_after),
             0,
             0,
             0,
@@ -163,7 +232,7 @@ pub fn configure_desktop_overlay(hwnd: isize) {
         );
     }
     #[cfg(not(target_os = "windows"))]
-    let _ = hwnd;
+    let _ = (hwnd, topmost);
 }
 
 /// Enables or disables Win32 cross-process mouse click-through (`WS_EX_LAYERED | WS_EX_TRANSPARENT`).

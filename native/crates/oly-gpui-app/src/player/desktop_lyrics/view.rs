@@ -127,9 +127,39 @@ pub struct DesktopLyricsView {
     leave_at_ms: Option<f64>,
     toast: Option<(String, f64)>,
     last_row_idx: Option<usize>,
-    last_track_sig: String,
+    last_live_pos_ms: Option<f64>,
+    last_track_title: String,
+    last_track_artist: String,
     amll_row_springs: HashMap<usize, crate::player::model::RowMotion>,
     amll_bg_alpha: HashMap<usize, f32>,
+    amll_row_scales: HashMap<usize, crate::player::model::RowMotion>,
+    amll_prev_rows: Vec<(usize, Arc<RowLines>, f32, f32)>,
+    amll_exiting: Vec<(usize, Row, Arc<RowLines>, f32, f32, f32)>,
+    vert_col_springs: HashMap<usize, crate::player::model::RowMotion>,
+    vert_col_alpha: HashMap<usize, f32>,
+    vert_col_scrolls: HashMap<usize, f32>,
+    vert_multi_cache: HashMap<
+        usize,
+        (
+            u32,
+            u32,
+            Arc<(Vec<VerticalToken>, Vec<f32>, f32)>,
+            Option<(u32, Arc<(Vec<VerticalToken>, Vec<f32>, f32)>)>,
+        ),
+    >,
+    vert_prev_cols: Vec<(usize, f32, f32, f32, f32, f32, Arc<(Vec<VerticalToken>, Vec<f32>, f32)>)>,
+    vert_exiting_cols: Vec<(
+        usize,
+        Row,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        Arc<(Vec<VerticalToken>, Vec<f32>, f32)>,
+    )>,
+    last_parent_tick_ms: f64,
     line_fade_start_ms: f64,
     last_origin: Option<(f32, f32)>,
     last_size: Option<(f32, f32)>,
@@ -192,9 +222,21 @@ impl DesktopLyricsView {
             leave_at_ms: None,
             toast: None,
             last_row_idx: None,
-            last_track_sig: String::new(),
+            last_live_pos_ms: None,
+            last_track_title: String::new(),
+            last_track_artist: String::new(),
             amll_row_springs: HashMap::new(),
             amll_bg_alpha: HashMap::new(),
+            amll_row_scales: HashMap::new(),
+            amll_prev_rows: Vec::new(),
+            amll_exiting: Vec::new(),
+            vert_col_springs: HashMap::new(),
+            vert_col_alpha: HashMap::new(),
+            vert_col_scrolls: HashMap::new(),
+            vert_multi_cache: HashMap::new(),
+            vert_prev_cols: Vec::new(),
+            vert_exiting_cols: Vec::new(),
+            last_parent_tick_ms: -1000.0,
             line_fade_start_ms: 0.0,
             last_origin: None,
             last_size: None,
@@ -422,7 +464,7 @@ impl DesktopLyricsView {
         )
     }
 
-    fn spawn_glass_popover<V: 'static + Render>(
+    pub(crate) fn spawn_glass_popover<V: 'static + Render>(
         title: &'static str,
         pos: (f32, f32),
         size_px: (f32, f32),
@@ -431,6 +473,7 @@ impl DesktopLyricsView {
         build: impl FnOnce(&mut Window, &mut Context<V>) -> V + 'static,
     ) -> Option<AnyWindowHandle> {
         let options = WindowOptions {
+            inactive_frame_interval: None,
             window_bounds: Some(WindowBounds::Windowed(gpui_kit::bounds(
                 point(px(pos.0), px(pos.1)),
                 size(px(size_px.0), px(size_px.1)),
@@ -476,7 +519,7 @@ impl DesktopLyricsView {
         }
         self.close_popovers(cx);
         self.bridge.push(DesktopCommand::OpenVolume);
-        let (pw, ph) = (240.0_f32, 96.0_f32);
+        let (pw, ph) = (VOLUME_POPOVER_W, VOLUME_POPOVER_H);
         let pos = self.open_popover_rect(anchor, pw, ph, window, cx);
         let bridge = self.bridge.clone();
         self.volume_popover = Self::spawn_glass_popover(
@@ -548,19 +591,19 @@ impl DesktopLyricsView {
         let left_fits = left_x >= min_x;
         let (px_c, side): (f32, i8) = match preferred_side {
             -1 => {
-                // L2 opened to the left of L1: L3 must prefer continuing left,
-                // clamping at the left edge instead of jumping right over L1.
                 if left_fits {
                     (left_x, -1)
+                } else if right_fits {
+                    (right_x, 1)
                 } else {
                     (left_x.clamp(min_x, max_x), -1)
                 }
             }
             1 => {
-                // L2 opened to the right of L1: L3 must prefer continuing right,
-                // clamping at the right edge instead of jumping left over L1.
                 if right_fits {
                     (right_x, 1)
+                } else if left_fits {
+                    (left_x, -1)
                 } else {
                     (right_x.clamp(min_x, max_x), 1)
                 }
@@ -609,13 +652,29 @@ impl DesktopLyricsView {
         let card_h = 160.0_f32;
         let pw = card_w + POPOVER_ELASTIC_PAD * 2.0;
         let ph = card_h + POPOVER_ELASTIC_PAD * 2.0;
+        let pref_l2: i8 = window
+            .display(cx)
+            .map(|d| {
+                let b = d.visible_bounds();
+                let dl = f32::from(b.origin.x);
+                let dr = dl + f32::from(b.size.width);
+                let right_room = dr - more_card_screen.right();
+                let left_room = more_card_screen.x - dl;
+                // Reserve space for both L2 (252) and L3 (240) so cascading doesn't hit the right edge.
+                if right_room < card_w + 256.0 && left_room > right_room {
+                    -1
+                } else {
+                    0
+                }
+            })
+            .unwrap_or(0);
         let (pos, side) = Self::side_popover_origin(
             more_card_screen,
             row_center_y_screen,
             card_w,
             card_h,
             26.0,
-            0,
+            pref_l2,
             window,
             cx,
         );
@@ -944,61 +1003,6 @@ fn word_progress(pos_ms: f64, start_ms: f64, end_ms: f64) -> f32 {
     ((pos_ms - start_ms) / (end_ms - start_ms)).clamp(0.0, 1.0) as f32
 }
 
-fn paint_interlude_dots(
-    window: &mut Window,
-    orient: DesktopOrientation,
-    cx_pos: f32,
-    cy_pos: f32,
-    font_size: f32,
-    dot_scale: f32,
-    text_rgb: u32,
-    snap: &oly_core::interlude::InterludeSnapshot,
-) {
-    let base_d = (font_size * 0.28 * dot_scale).clamp(7.0, 18.0);
-    let base_g = base_d * 0.72;
-    let d = base_d * snap.scale as f32;
-    let g = base_g * snap.scale as f32;
-    let opacity = snap.opacity as f32;
-    if d <= 0.0 || opacity <= 0.005 {
-        return;
-    }
-    let dark_text = is_dark_color(text_rgb);
-    let shadow_rgb = if dark_text { 0xFFFFFF } else { 0x000000 };
-    let span = d * 3.0 + g * 2.0;
-    for i in 0..3 {
-        let a = (opacity * snap.dot_opacities[i] as f32).clamp(0.0, 1.0);
-        if a <= 0.005 {
-            continue;
-        }
-        let (dx, dy) = match orient {
-            DesktopOrientation::Horizontal => {
-                (cx_pos - span * 0.5 + i as f32 * (d + g), cy_pos - d * 0.5)
-            }
-            DesktopOrientation::Vertical => {
-                (cx_pos - d * 0.5, cy_pos - span * 0.5 + i as f32 * (d + g))
-            }
-        };
-        chrome::fill_round_subpixel(
-            window,
-            dx,
-            dy + if dark_text { 0.0 } else { 1.5 },
-            d,
-            d,
-            d * 0.5,
-            Hsla::from(gpui_kit::rgb(shadow_rgb)).opacity(0.55 * a),
-        );
-        chrome::fill_round_subpixel(
-            window,
-            dx,
-            dy,
-            d,
-            d,
-            d * 0.5,
-            Hsla::from(gpui_kit::rgb(text_rgb)).opacity(a),
-        );
-    }
-}
-
 fn measure_vertical_steps(
     window: &Window,
     tokens: &[VerticalToken],
@@ -1008,7 +1012,9 @@ fn measure_vertical_steps(
     let mut steps = Vec::with_capacity(tokens.len());
     let mut total = 0.0_f32;
     let run_fs = fs * 0.92;
-    for tok in tokens {
+    for (i, tok) in tokens.iter().enumerate() {
+        let next_is_latin = matches!(tokens.get(i + 1), Some(VerticalToken::RotatedRun { .. }));
+        let prev_is_latin = i > 0 && matches!(tokens.get(i - 1), Some(VerticalToken::RotatedRun { .. }));
         let step = match tok {
             VerticalToken::Space => fs * 0.42,
             VerticalToken::UprightChar { .. } => fs * 1.06,
@@ -1021,7 +1027,13 @@ fn measure_vertical_steps(
                     None,
                 );
                 let gw = f32::from(layout.width);
-                gw.max(fs * 0.45) + fs * 0.08
+                // Adjacent RotatedRuns without Space belong to the same multi-syllable English word:
+                // keep exact glyph width with zero extra gap so long words never split apart.
+                if next_is_latin || prev_is_latin {
+                    gw.max(1.0)
+                } else {
+                    gw.max(fs * 0.45) + fs * 0.08
+                }
             }
         };
         steps.push(step);
@@ -1098,17 +1110,28 @@ fn paint_vertical_text_column(
     base_alpha: f32,
     fade: f32,
     scroll_y: f32,
+    premeasured: Option<&(Vec<VerticalToken>, Vec<f32>, f32)>,
 ) {
-    let tokens = tokenize_vertical_row(row);
-    if tokens.is_empty() {
-        return;
-    }
+    let owned_measured;
+    let (tokens, steps, total_h): (&[VerticalToken], &[f32], f32) = if let Some((t, s, h)) = premeasured {
+        if t.is_empty() {
+            return;
+        }
+        (t.as_slice(), s.as_slice(), *h)
+    } else {
+        let t = tokenize_vertical_row(row);
+        if t.is_empty() {
+            return;
+        }
+        let (s, h) = measure_vertical_steps(window, &t, base_font, display.weight);
+        owned_measured = (t, s, h);
+        (&owned_measured.0, &owned_measured.1, owned_measured.2)
+    };
 
     let fs = base_font;
     let vis_top = 18.0_f32;
     let vis_bottom = (win_h - 18.0).max(vis_top + 60.0);
     let vis_h = (vis_bottom - vis_top).max(60.0);
-    let (steps, total_h) = measure_vertical_steps(window, &tokens, fs, display.weight);
     let overflowing = total_h > vis_h;
     let mut cur_y = if overflowing {
         vis_top - scroll_y.clamp(0.0, (total_h - vis_h).max(0.0))
@@ -1122,9 +1145,9 @@ fn paint_vertical_text_column(
     let shadow_rgb = 0x000000_u32;
     let glow_rgb = text_rgb;
     let elapsed_line = shaped.map(|s| playhead_ms - s.line_start_ms).unwrap_or(0.0);
-    let word_timed = shaped.is_some_and(|s| s.word_timed);
-    let dark_a = (display.unplayed * base_alpha * fade).clamp(0.0, 1.0);
-    let bright_a = (display.bright * base_alpha * fade).clamp(0.0, 1.0);
+    let word_timed = row.word_timed || shaped.is_some_and(|s| s.word_timed);
+    let dark_a = (display.unplayed.max(0.52) * base_alpha * fade).clamp(0.0, 1.0);
+    let bright_a = (base_alpha * fade).clamp(0.0, 1.0);
     let fade_band = 36.0_f32;
     let edge_fade = |y_pos: f32| -> f32 {
         if !overflowing {
@@ -1310,8 +1333,12 @@ fn paint_vertical_text_column(
                     for g in &r.glyphs {
                         let gx_pos = f32::from(g.position.x);
                         let rot_y = cy + (gx + gx_pos - cx) * sc;
-                        let ea = edge_fade(rot_y);
-                        if ea <= 0.005 {
+                        let ea = if overflowing {
+                            edge_fade(rot_y)
+                        } else {
+                            1.0
+                        };
+                        if ea <= 0.01 {
                             continue;
                         }
                         let gp = if word_timed {
@@ -1331,20 +1358,23 @@ fn paint_vertical_text_column(
                         let origin = point(px(gx) + g.position.x, px(baseline) + g.position.y);
                         #[cfg(target_os = "windows")]
                         {
-                            let mut st = transform;
-                            st.translation[1] += if dark_text { 1.0 * sf } else { 1.5 * sf };
-                            let _ = window.paint_lyric_glyph(
-                                origin,
-                                r.font_id,
-                                g.id,
-                                px(run_fs),
-                                Hsla::from(gpui_kit::rgb(shadow_rgb))
-                                    .opacity((shadow_alpha_scale * alpha).clamp(0.0, 0.85)),
-                                st,
-                                [0.0; 4],
-                                [0.0; 4],
-                                2,
-                            );
+                            // Suppress drop shadow on very faint edge glyphs so they never appear as dark blobs.
+                            if alpha >= 0.14 {
+                                let mut st = transform;
+                                st.translation[1] += if dark_text { 1.0 * sf } else { 1.5 * sf };
+                                let sa = (shadow_alpha_scale * alpha * alpha.min(1.0)).clamp(0.0, 0.85);
+                                let _ = window.paint_lyric_glyph(
+                                    origin,
+                                    r.font_id,
+                                    g.id,
+                                    px(run_fs),
+                                    Hsla::from(gpui_kit::rgb(shadow_rgb)).opacity(sa),
+                                    st,
+                                    [0.0; 4],
+                                    [0.0; 4],
+                                    2,
+                                );
+                            }
                             if glow * ea > 0.002 && blur > 0.0 {
                                 let _ = window.paint_lyric_glyph(
                                     origin,
@@ -1401,12 +1431,13 @@ fn paint_horiz_translation(
     let pad_x = 24.0_f32;
     let max_w = (win_w - pad_x * 2.0).max(200.0);
     let (raw_w, _) = chrome::measure(window, trimmed, font_size, 500.0);
-    let fs = if !auto_scroll && raw_w > max_w && raw_w > 1.0 {
-        (font_size * (max_w / raw_w)).clamp(11.0, font_size)
+    let (fs, tw) = if !auto_scroll && raw_w > max_w && raw_w > 1.0 {
+        let shrunk = (font_size * (max_w / raw_w)).clamp(11.0, font_size);
+        let (w, _) = chrome::measure(window, trimmed, shrunk, 500.0);
+        (shrunk, w)
     } else {
-        font_size
+        (font_size, raw_w)
     };
-    let (tw, _) = chrome::measure(window, trimmed, fs, 500.0);
     let overflowing = auto_scroll && tw > max_w;
     let x = if overflowing {
         pad_x - scroll_x.clamp(0.0, (tw - max_w).max(0.0))
@@ -1456,16 +1487,21 @@ fn paint_horiz_translation(
 
 impl Render for DesktopLyricsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let parent = self.parent.clone();
-        window.defer(cx, move |_, cx| {
-            let _ = parent.update(cx, |pv, _| {
-                pv.tick_live_for_desktop();
-            });
-        });
-
         let now = self.now_ms();
-        let dt = (now - self.last_ms).clamp(1.0, 80.0);
+        let dt = (now - self.last_ms).clamp(1.0, 33.0);
         self.last_ms = now;
+
+        // Throttle cross-window parent sync to ~20Hz (50ms) so high-refresh local interpolation
+        // stays silky smooth without thrashing the main window on every 120Hz frame.
+        if now - self.last_parent_tick_ms >= 50.0 {
+            self.last_parent_tick_ms = now;
+            let parent = self.parent.clone();
+            window.defer(cx, move |_, cx| {
+                let _ = parent.update(cx, |pv, _| {
+                    pv.tick_live_for_desktop();
+                });
+            });
+        }
 
         for act in self.bridge.drain_popover() {
             match act {
@@ -1723,16 +1759,37 @@ impl Render for DesktopLyricsView {
         } else {
             snap.position_ms
         };
-        let track_sig = format!("{}\0{}", snap.track_title, snap.track_artist);
-        let track_changed = !self.last_track_sig.is_empty() && track_sig != self.last_track_sig;
-        if track_sig != self.last_track_sig {
-            self.last_track_sig = track_sig;
+        let track_diff =
+            snap.track_title != self.last_track_title || snap.track_artist != self.last_track_artist;
+        let track_changed =
+            (!self.last_track_title.is_empty() || !self.last_track_artist.is_empty()) && track_diff;
+        if track_diff {
+            self.last_track_title.clear();
+            self.last_track_title.push_str(&snap.track_title);
+            self.last_track_artist.clear();
+            self.last_track_artist.push_str(&snap.track_artist);
         }
         let mut amll_snap_instant = track_changed;
         if track_changed {
+            self.last_live_pos_ms = None;
             self.amll_row_springs.clear();
             self.amll_bg_alpha.clear();
+            self.amll_row_scales.clear();
+            self.amll_prev_rows.clear();
+            self.amll_exiting.clear();
+            self.vert_col_springs.clear();
+            self.vert_col_alpha.clear();
+            self.vert_col_scrolls.clear();
+            self.vert_multi_cache.clear();
+            self.vert_prev_cols.clear();
+            self.vert_exiting_cols.clear();
         }
+        if let Some(prev_pos) = self.last_live_pos_ms {
+            if (live_pos_ms - prev_pos).abs() > 1500.0 {
+                amll_snap_instant = true;
+            }
+        }
+        self.last_live_pos_ms = Some(live_pos_ms);
         if snap.active_row_index != self.last_row_idx {
             let prev_idx = self.last_row_idx;
             let first = prev_idx.is_none();
@@ -1742,11 +1799,7 @@ impl Render for DesktopLyricsView {
             self.vert_trans_scroll = 0.0;
             self.horiz_main_scroll = 0.0;
             self.horiz_trans_scroll = 0.0;
-            let large_jump = match (prev_idx, snap.active_row_index) {
-                (Some(p), Some(n)) => n < p || n.saturating_sub(p) > 3,
-                _ => true,
-            };
-            if large_jump {
+            if first && self.amll_prev_rows.is_empty() && self.vert_prev_cols.is_empty() {
                 amll_snap_instant = true;
             }
         }
@@ -1979,89 +2032,104 @@ impl Render for DesktopLyricsView {
 
         let horiz_avail_w = (win_w - 48.0).max(200.0);
         let display_lines = self.cfg.display_lines.clamp(1, 3);
-        let shaped_active = snap.active_row.as_ref().and_then(|row| {
-            self.shape_single_line(row, &snap.display, font_size, horiz_avail_w, auto_scroll)
-        });
+        let shaped_active = if orient == DesktopOrientation::Vertical {
+            snap.active_row.as_ref().and_then(|row| {
+                self.shape_single_line(row, &snap.display, font_size, horiz_avail_w, auto_scroll)
+            })
+        } else {
+            None
+        };
         // Reuse main window's AMLL multi-line layout: full row list with harmony (`is_bg`),
-        // duet left/right alignment (`r.duet`), per-line staggered `Spring` matching `springFeel`,
-        // and safe vertical padding so the hover control bar never overlaps lyrics.
+        // duet left/right alignment (`r.duet`), and per-line staggered `Spring` matching `springFeel`.
+        // Keep lyric bounds fixed on hover so hovering never shrinks desktop lyrics.
         let amll_has_duet = snap.rows.iter().any(|r| r.is_duet);
-        let safe_top = if orient == DesktopOrientation::Horizontal && hover_alpha > 0.02 && bar_side_t < 0.5 {
-            40.0 * hover_alpha + 8.0 * (1.0 - hover_alpha)
-        } else {
-            8.0
-        };
-        let safe_bot = if orient == DesktopOrientation::Horizontal && hover_alpha > 0.02 && bar_side_t >= 0.5 {
-            40.0 * hover_alpha + 8.0 * (1.0 - hover_alpha)
-        } else {
-            8.0
-        };
-        let amll_area_top = safe_top;
-        let amll_area_h = (win_h - safe_top - safe_bot).max(52.0);
+        let amll_area_top = 8.0_f32;
+        let amll_area_h = (win_h - 16.0).max(52.0);
         struct AmllMultiRow {
             idx: usize,
             row: Row,
             shaped: Arc<RowLines>,
             y: f32,
             bg_alpha: f32,
+            scale: f32,
+            exiting: bool,
+            exit_dim: f32,
         }
+        // Inline interlude dots Y coordinate for multi-line horizontal AMLL (squeezed between lines, never clearing screen).
+        let mut amll_inline_interlude_y: Option<f32> = None;
+        let in_interlude = interlude_snap.is_some() || snap.interlude_range.is_some();
         let amll_multi: Vec<AmllMultiRow> = if orient == DesktopOrientation::Horizontal
-            && display_lines > 1
             && !snap.rows.is_empty()
+            && (snap.active_row.is_some() || (display_lines > 1 && in_interlude))
         {
-            let max_lines = display_lines as usize;
-            let selected_indices =
-                select_amll_multi_indices(&snap.rows, snap.active_row_index, live_pos_ms, max_lines);
-            let anchor_idx = snap
-                .active_row_index
-                .unwrap_or_else(|| selected_indices.first().copied().unwrap_or(0));
-            let slot_budget: f32 = selected_indices
-                .iter()
-                .map(|&i| {
-                    let r = &snap.rows[i];
-                    let base = if r.is_bg { 0.85 } else { 1.05 };
-                    if show_trans && !r.translation.trim().is_empty() {
-                        base + 0.58
-                    } else {
-                        base
-                    }
-                })
-                .sum();
-            let avail_per_slot = (amll_area_h / slot_budget.max(1.0)).max(18.0);
-            let fit_scale = (avail_per_slot / (font_size * 1.25)).clamp(0.42, 1.0);
+            if amll_snap_instant || !snap.display.enable_spring {
+                self.amll_exiting.clear();
+                self.amll_prev_rows.clear();
+            }
+            let max_lines = display_lines.clamp(1, 3) as usize;
+            let selected_indices = if max_lines > 1 && in_interlude {
+                select_interlude_multi_indices(&snap.rows, snap.active_row_index, live_pos_ms, max_lines)
+            } else if max_lines == 1 {
+                snap.active_row_index
+                    .filter(|&i| i < snap.rows.len() && !snap.rows[i].text.trim().is_empty())
+                    .map(|i| vec![i])
+                    .unwrap_or_else(|| {
+                        select_amll_multi_indices(&snap.rows, snap.active_row_index, live_pos_ms, 1)
+                    })
+            } else {
+                select_amll_multi_indices(&snap.rows, snap.active_row_index, live_pos_ms, max_lines)
+            };
+            // Stable fit_scale based on fixed slot budget so font size never jumps on line transitions.
+            let fit_scale = if max_lines == 1 {
+                1.0
+            } else {
+                let per_row_slots = if show_trans { 1.62 } else { 1.08 };
+                let avail_per_slot = (amll_area_h / (max_lines as f32 * per_row_slots)).max(18.0);
+                (avail_per_slot / (font_size * 1.25)).clamp(0.42, 1.0)
+            };
             let bg_scale = snap.display.bg_scale.clamp(0.55, 0.90);
             let gap = 6.0_f32;
-            let spring_params = match snap.display.spring_feel {
-                crate::player::model::SpringFeel::Lively => SpringParams::new(260.0, 26.0),
-                crate::player::model::SpringFeel::Soft => SpringParams::new(125.0, 22.0),
-                crate::player::model::SpringFeel::Standard => SpringParams::new(180.0, 24.0),
-            };
+            let spring_params = desktop_spring_params(snap.display.spring_feel);
+            let base_row_fs = (font_size * fit_scale).clamp(13.0, MAX_FONT);
 
-            let mut shaped_window: Vec<(usize, Row, Arc<RowLines>, f32, f32)> =
+            let mut shaped_window: Vec<(usize, Row, Arc<RowLines>, f32, f32, f32)> =
                 Vec::with_capacity(selected_indices.len());
             for &idx in &selected_indices {
                 let r = &snap.rows[idx];
                 if r.text.trim().is_empty() {
                     continue;
                 }
-                let is_active = Some(idx) == snap.active_row_index;
+                let is_singing = live_pos_ms >= r.start_ms - 80.0 && live_pos_ms <= r.end_ms + 260.0;
+                let is_active = Some(idx) == snap.active_row_index || is_singing;
                 let bg_target = 1.0_f32;
-                let bg_alpha = {
-                    let bg_a = self.amll_bg_alpha.entry(idx).or_insert(if r.is_bg { 0.0 } else { 1.0 });
-                    let step = (dt as f32 / 160.0).clamp(0.0, 1.0);
-                    *bg_a += (bg_target - *bg_a) * step;
-                    *bg_a
-                };
-                let role_scale = if r.is_bg {
-                    bg_scale
-                } else if is_active {
+                let init_alpha = if amll_snap_instant || !snap.display.enable_spring || self.amll_prev_rows.is_empty() {
                     1.0
                 } else {
-                    0.88
+                    0.0
                 };
-                let row_fs = (font_size * fit_scale * role_scale).clamp(13.0, MAX_FONT);
-                let row_auto_scroll = auto_scroll && is_active && !r.is_bg;
-                if let Some(s) = self.shape_single_line(r, &snap.display, row_fs, horiz_avail_w, row_auto_scroll) {
+                let bg_alpha = {
+                    let bg_a = self.amll_bg_alpha.entry(idx).or_insert(init_alpha);
+                    let step = (dt as f32 / 190.0).clamp(0.0, 1.0);
+                    *bg_a = (*bg_a + step).min(bg_target);
+                    smoothstep01(*bg_a)
+                };
+                let target_scale = if r.is_bg {
+                    bg_scale
+                } else if is_active || max_lines == 1 {
+                    1.0
+                } else {
+                    0.90
+                };
+                let direct_sc = amll_snap_instant || !snap.display.enable_spring;
+                let row_scale = {
+                    let sc = self
+                        .amll_row_scales
+                        .entry(idx)
+                        .or_insert_with(|| crate::player::model::RowMotion::new(target_scale as f64));
+                    sc.step(target_scale as f64, direct_sc, 0.0, dt, spring_params) as f32
+                };
+                // Keep `auto_scroll` invariant across active/inactive transitions so shaper cache hits 100% (zero frame drop).
+                if let Some(s) = self.shape_single_line(r, &snap.display, base_row_fs, horiz_avail_w, auto_scroll) {
                     let row_tfs = (s.font_size * 0.58).clamp(10.5, 26.0);
                     let th = if show_trans && !r.translation.trim().is_empty() {
                         2.0 + row_tfs * 1.18
@@ -2069,53 +2137,185 @@ impl Render for DesktopLyricsView {
                         0.0
                     };
                     let total_row_h = s.line_height + th + gap;
-                    shaped_window.push((idx, r.clone(), s, total_row_h, bg_alpha));
+                    shaped_window.push((idx, r.clone(), s, total_row_h, bg_alpha, row_scale));
                 }
             }
 
-            // Vertically center the strictly <= N selected rows inside the safe lyric area.
+            // If multi-line mode is in an interlude, reserve an inline slot for the 3-dot breather
+            // between the last finished row and the next upcoming row instead of clearing lyrics.
+            let inline_dot_slot = if max_lines > 1 {
+                interlude_snap.as_ref().map(|isnap| {
+                    let base_d = (base_row_fs * 0.28 * snap.display.dot_scale).clamp(7.0, 16.0);
+                    let h = (base_d * 1.8 * isnap.opacity as f32).max(0.0);
+                    let insert_pos = shaped_window
+                        .iter()
+                        .position(|(_, r, ..)| r.start_ms > live_pos_ms)
+                        .unwrap_or(shaped_window.len());
+                    (insert_pos, h)
+                })
+            } else {
+                None
+            };
+            let extra_dot_h = inline_dot_slot.map(|(_, h)| h).unwrap_or(0.0);
+
+            // Vertically center the strictly <= N selected rows (+ optional inline interlude slot).
             let total_stack_h: f32 = (shaped_window
                 .iter()
-                .map(|(_, _, _, h, _)| *h)
+                .map(|(_, _, _, h, _, _)| *h)
                 .sum::<f32>()
+                + extra_dot_h
                 - gap)
                 .max(0.0);
             let mut target_ys = vec![0.0_f32; shaped_window.len()];
-            let mut y_cur = amll_area_top + ((amll_area_h - total_stack_h) * 0.5).max(0.0);
-            for (k, (_, _, _, h, _)) in shaped_window.iter().enumerate() {
+            let mut y_cur = if max_lines == 1 {
+                amll_area_top + ((amll_area_h - total_stack_h) * 0.5).max(0.0)
+            } else {
+                // Anchor multi-line stack using the fixed `max_lines` slot budget so adding/removing
+                // a 2nd/3rd harmony row never jerks existing rows vertically.
+                let nominal_lh = base_row_fs * snap.display.line_height_em.max(1.15);
+                let nominal_th = if show_trans {
+                    2.0 + (base_row_fs * 0.58).clamp(10.5, 26.0) * 1.18
+                } else {
+                    0.0
+                };
+                let budget_h =
+                    (max_lines as f32 * (nominal_lh + nominal_th + gap) - gap).max(0.0);
+                let centered = amll_area_top + ((amll_area_h - budget_h) * 0.5).max(0.0);
+                let max_top = amll_area_top + (amll_area_h - total_stack_h).max(0.0);
+                centered.min(max_top)
+            };
+            for (k, (_, _, _, h, _, _)) in shaped_window.iter().enumerate() {
+                if let Some((ins_k, dot_h)) = inline_dot_slot {
+                    if k == ins_k && dot_h > 0.5 {
+                        amll_inline_interlude_y = Some(y_cur + dot_h * 0.45);
+                        y_cur += dot_h;
+                    }
+                }
                 target_ys[k] = y_cur;
                 y_cur += *h;
             }
+            if let Some((ins_k, dot_h)) = inline_dot_slot {
+                if ins_k >= shaped_window.len() && dot_h > 0.5 {
+                    amll_inline_interlude_y = Some(y_cur + dot_h * 0.45);
+                }
+            }
 
-            let mut out = Vec::with_capacity(shaped_window.len());
-            for (k, (idx, row, shaped, row_h, bg_alpha)) in shaped_window.into_iter().enumerate() {
+            // Keep any removed row briefly so top rows glide upward and middle/trailing rows fade in place.
+            let prev_first_idx = self.amll_prev_rows.first().map(|(i, ..)| *i);
+            let first_new_idx = selected_indices.first().copied().unwrap_or(0);
+            let first_target_y = target_ys.first().copied().unwrap_or(amll_area_top);
+            if !amll_snap_instant && snap.display.enable_spring {
+                let prev = std::mem::take(&mut self.amll_prev_rows);
+                let drift_frac = if max_lines == 1 { 0.36 } else { 0.56 };
+                for (p_idx, p_shaped, p_h, p_dim) in prev {
+                    if !selected_indices.contains(&p_idx)
+                        && !self.amll_exiting.iter().any(|(ei, ..)| *ei == p_idx)
+                    {
+                        if let Some(p_row) = snap.rows.get(p_idx) {
+                            let exit_y = if p_idx < first_new_idx {
+                                first_target_y - p_h * drift_frac
+                            } else {
+                                self.amll_row_springs
+                                    .get(&p_idx)
+                                    .map(|m| m.position() as f32)
+                                    .unwrap_or(first_target_y)
+                            };
+                            self.amll_exiting.push((
+                                p_idx,
+                                p_row.clone(),
+                                p_shaped,
+                                exit_y,
+                                1.0,
+                                p_dim,
+                            ));
+                        }
+                    }
+                }
+            }
+            self.amll_exiting.retain(|(ei, ..)| !selected_indices.contains(ei));
+            self.amll_prev_rows = shaped_window
+                .iter()
+                .map(|(i, r, s, h, bg_a, _)| {
+                    let is_act = Some(*i) == snap.active_row_index
+                        || (live_pos_ms >= r.start_ms - 80.0 && live_pos_ms <= r.end_ms + 260.0);
+                    let base_d = if is_act {
+                        if r.is_bg { 0.88 } else { 1.0 }
+                    } else if r.is_bg {
+                        0.50
+                    } else {
+                        snap.display.bg_opacity.max(0.54).clamp(0.54, 0.72)
+                    };
+                    (*i, Arc::clone(s), *h, base_d * *bg_a)
+                })
+                .collect();
+
+            let mut out = Vec::with_capacity(shaped_window.len() + self.amll_exiting.len());
+            for (e_idx, e_row, e_shaped, e_ty, e_alpha, e_start_dim) in &mut self.amll_exiting {
+                *e_alpha = (*e_alpha - (dt as f32 / 360.0)).max(0.0);
+                let sp = self
+                    .amll_row_springs
+                    .entry(*e_idx)
+                    .or_insert_with(|| crate::player::model::RowMotion::new(*e_ty as f64));
+                let cur_y = sp.step(*e_ty as f64, false, 0.0, dt, spring_params) as f32;
+                let eased_a = smoothstep01(*e_alpha);
+                if eased_a > 0.01 {
+                    let base_sc = self
+                        .amll_row_scales
+                        .get(e_idx)
+                        .map(|m| m.position() as f32)
+                        .unwrap_or(0.96);
+                    let sc = base_sc * (0.94 + 0.06 * eased_a);
+                    out.push(AmllMultiRow {
+                        idx: *e_idx,
+                        row: e_row.clone(),
+                        shaped: Arc::clone(e_shaped),
+                        y: cur_y,
+                        bg_alpha: eased_a,
+                        scale: sc,
+                        exiting: true,
+                        exit_dim: *e_start_dim,
+                    });
+                }
+            }
+            self.amll_exiting.retain(|(_, _, _, _, a, _)| *a > 0.01);
+
+            for (k, (idx, row, shaped, row_h, bg_alpha, row_scale)) in shaped_window.into_iter().enumerate() {
                 let ty = target_ys[k] as f64;
-                let dist = idx.abs_diff(anchor_idx);
                 let sp = self.amll_row_springs.entry(idx).or_insert_with(|| {
                     let start_y = if amll_snap_instant || !snap.display.enable_spring {
                         ty
+                    } else if prev_first_idx.is_some_and(|pf| idx < pf) {
+                        ty - (row_h as f64) * 0.45
                     } else {
-                        ty + (row_h as f64) * 0.55
+                        ty + (row_h as f64) * 0.45
                     };
                     crate::player::model::RowMotion::new(start_y)
                 });
                 let direct = amll_snap_instant || !snap.display.enable_spring;
-                let delay_s = (dist.min(3) as f64) * 0.028;
-                let cur_y = sp.step(ty, direct, delay_s, dt, spring_params) as f32;
+                let delay = if direct || max_lines <= 1 { 0.0 } else { (k as f64) * 0.018 };
+                let cur_y = sp.step(ty, direct, delay, dt, spring_params) as f32;
                 out.push(AmllMultiRow {
                     idx,
                     row,
                     shaped,
                     y: cur_y,
                     bg_alpha,
+                    scale: row_scale,
+                    exiting: false,
+                    exit_dim: 1.0,
                 });
             }
+            let exiting_ids: Vec<usize> = self.amll_exiting.iter().map(|(i, ..)| *i).collect();
             self.amll_row_springs
-                .retain(|i, _| selected_indices.contains(i));
+                .retain(|i, _| selected_indices.contains(i) || exiting_ids.contains(i));
             self.amll_bg_alpha
                 .retain(|i, _| selected_indices.contains(i));
+            self.amll_row_scales
+                .retain(|i, _| selected_indices.contains(i) || exiting_ids.contains(i));
             out
         } else {
+            self.amll_exiting.clear();
+            self.amll_prev_rows.clear();
             Vec::new()
         };
 
@@ -2302,6 +2502,285 @@ impl Render for DesktopLyricsView {
             vert_trans_scroll = 0.0;
         }
 
+        // Precompute vertical multi-line column positions (with smooth horizontal slide springs
+        // and independent per-column overflow scroll using live_pos_ms).
+        struct VertMultiCol {
+            idx: usize,
+            row: Row,
+            slot_left: f32,
+            slot_w: f32,
+            col_cx: f32,
+            trans_cx: Option<f32>,
+            col_fs: f32,
+            col_tfs: f32,
+            alpha: f32,
+            scroll_y: f32,
+            measured_main: Arc<(Vec<VerticalToken>, Vec<f32>, f32)>,
+            measured_trans: Option<Arc<(Vec<VerticalToken>, Vec<f32>, f32)>>,
+        }
+        let mut vert_inline_interlude_x: Option<f32> = None;
+        let vert_multi_cols: Vec<VertMultiCol> = if orient == DesktopOrientation::Vertical
+            && display_lines > 1
+            && !snap.rows.is_empty()
+        {
+            if amll_snap_instant || !snap.display.enable_spring {
+                self.vert_exiting_cols.clear();
+                self.vert_prev_cols.clear();
+            }
+            let max_lines = display_lines.clamp(1, 3) as usize;
+            let v_indices = if in_interlude {
+                select_interlude_multi_indices(&snap.rows, snap.active_row_index, live_pos_ms, max_lines)
+            } else {
+                select_amll_multi_indices(&snap.rows, snap.active_row_index, live_pos_ms, max_lines)
+            };
+            let v_area_left = 8.0_f32;
+            let v_area_w = (win_w - 16.0).max(80.0);
+            // Fixed slot width derived from `max_lines` (not `v_indices.len()`) so column count
+            // changes (2 <-> 3) never jump font size, invalidate measurement cache, or jerk all columns.
+            let slot_w = (v_area_w / max_lines as f32).max(28.0);
+            // Screen-side adaptive column direction:
+            // - Window on right half (`trans_right_t >= 0.5`): LEFTMOST col = current active row, upcoming -> right.
+            // - Window on left half (`trans_right_t < 0.5`): RIGHTMOST col = current active row, upcoming -> left.
+            let on_right_half = trans_right_t >= 0.5;
+            let col_fs = (font_size.min(slot_w * if show_trans { 0.42 } else { 0.64 }))
+                .clamp(13.0, MAX_FONT);
+            let col_tfs = (col_fs * 0.58).clamp(11.0, 24.0);
+            let spring_params = desktop_spring_params(snap.display.spring_feel);
+            let vis_h = (win_h - 36.0).max(60.0);
+            let prev_first_idx = self.vert_prev_cols.first().map(|(i, ..)| *i);
+            let first_new_idx = v_indices.first().copied().unwrap_or(0);
+            let first_slot_cx = if on_right_half {
+                v_area_left + slot_w * 0.5
+            } else {
+                v_area_left + v_area_w - slot_w * 0.5
+            };
+            if !amll_snap_instant && snap.display.enable_spring {
+                let prev = std::mem::take(&mut self.vert_prev_cols);
+                for (p_idx, p_fs, p_tfs, p_scroll, p_sw, p_alpha, p_measured) in prev {
+                    if !v_indices.contains(&p_idx)
+                        && !self.vert_exiting_cols.iter().any(|(ei, ..)| *ei == p_idx)
+                    {
+                        if let Some(p_row) = snap.rows.get(p_idx) {
+                            let exit_x = if p_idx < first_new_idx {
+                                first_slot_cx + if on_right_half { -p_sw * 0.42 } else { p_sw * 0.42 }
+                            } else {
+                                self.vert_col_springs
+                                    .get(&p_idx)
+                                    .map(|m| m.position() as f32)
+                                    .unwrap_or(first_slot_cx)
+                            };
+                            self.vert_exiting_cols.push((
+                                p_idx,
+                                p_row.clone(),
+                                exit_x,
+                                p_fs,
+                                p_tfs,
+                                p_scroll,
+                                1.0,
+                                p_alpha,
+                                p_measured,
+                            ));
+                        }
+                    }
+                }
+            }
+            self.vert_exiting_cols.retain(|(ei, ..)| !v_indices.contains(ei));
+
+            let mut cols = Vec::with_capacity(v_indices.len() + self.vert_exiting_cols.len());
+            for (e_idx, e_row, e_tx, e_fs, e_tfs, e_scroll, e_alpha, e_start_a, e_measured) in
+                &mut self.vert_exiting_cols
+            {
+                *e_alpha = (*e_alpha - (dt as f32 / 360.0)).max(0.0);
+                let sp = self
+                    .vert_col_springs
+                    .entry(*e_idx)
+                    .or_insert_with(|| crate::player::model::RowMotion::new(*e_tx as f64));
+                let cur_cx = sp.step(*e_tx as f64, false, 0.0, dt, spring_params) as f32;
+                let eased_a = smoothstep01(*e_alpha);
+                if eased_a > 0.01 {
+                    cols.push(VertMultiCol {
+                        idx: *e_idx,
+                        row: e_row.clone(),
+                        slot_left: cur_cx - slot_w * 0.5,
+                        slot_w,
+                        col_cx: cur_cx,
+                        trans_cx: None,
+                        col_fs: *e_fs,
+                        col_tfs: *e_tfs,
+                        alpha: eased_a * *e_start_a,
+                        scroll_y: *e_scroll,
+                        measured_main: Arc::clone(e_measured),
+                        measured_trans: None,
+                    });
+                }
+            }
+            self.vert_exiting_cols.retain(|(_, _, _, _, _, _, a, _, _)| *a > 0.01);
+
+            let mut next_prev = Vec::with_capacity(v_indices.len());
+            let direct = amll_snap_instant || !snap.display.enable_spring;
+            for (k, &v_idx) in v_indices.iter().enumerate() {
+                let r = &snap.rows[v_idx];
+                if r.text.trim().is_empty() {
+                    continue;
+                }
+                let is_active = Some(v_idx) == snap.active_row_index
+                    || (live_pos_ms >= r.start_ms - 80.0 && live_pos_ms <= r.end_ms + 260.0);
+                let init_alpha = if direct || prev_first_idx.is_none() { 1.0 } else { 0.0 };
+                let fade_in = {
+                    let va = self.vert_col_alpha.entry(v_idx).or_insert(init_alpha);
+                    let step = (dt as f32 / 190.0).clamp(0.0, 1.0);
+                    *va = (*va + step).min(1.0);
+                    smoothstep01(*va)
+                };
+                let alpha = (if is_active {
+                    if r.is_bg { 0.88 } else { 1.0 }
+                } else if r.is_bg {
+                    0.48
+                } else {
+                    snap.display.bg_opacity.max(0.54).clamp(0.54, 0.72)
+                }) * fade_in;
+                let slot_left = if on_right_half {
+                    v_area_left + k as f32 * slot_w
+                } else {
+                    v_area_left + v_area_w - (k + 1) as f32 * slot_w
+                };
+                let target_cx = slot_left + slot_w * 0.5;
+                if interlude_snap.is_some() && vert_inline_interlude_x.is_none() && r.start_ms > live_pos_ms {
+                    vert_inline_interlude_x = Some(if k == 0 {
+                        target_cx + if on_right_half { -slot_w * 0.42 } else { slot_w * 0.42 }
+                    } else {
+                        target_cx + if on_right_half { -slot_w * 0.5 } else { slot_w * 0.5 }
+                    });
+                }
+                let sp = self.vert_col_springs.entry(v_idx).or_insert_with(|| {
+                    let start_x = if direct {
+                        target_cx as f64
+                    } else {
+                        let from_leading = prev_first_idx.is_some_and(|pf| v_idx < pf);
+                        let delta = if from_leading { -slot_w * 0.42 } else { slot_w * 0.42 };
+                        (target_cx + if on_right_half { delta } else { -delta }) as f64
+                    };
+                    crate::player::model::RowMotion::new(start_x)
+                });
+                let delay = if direct { 0.0 } else { (k as f64) * 0.018 };
+                let cur_cx = sp.step(target_cx as f64, direct, delay, dt, spring_params) as f32;
+                let has_trans = show_trans && !r.translation.trim().is_empty() && slot_w >= 46.0;
+                let (main_cx, trans_cx) = if has_trans {
+                    let sep = (slot_w * 0.21).max(col_fs * 0.62).min(slot_w * 0.30);
+                    if on_right_half {
+                        (cur_cx - sep * 0.85, Some(cur_cx + sep * 0.95))
+                    } else {
+                        (cur_cx + sep * 0.85, Some(cur_cx - sep * 0.95))
+                    }
+                } else {
+                    (cur_cx, None)
+                };
+                // Keep main column font size invariant across active/inactive transitions so
+                // vertical measurement & glyph caches hit 100% (zero frame drops on column shift).
+                let eff_fs = if r.is_bg {
+                    (col_fs * snap.display.bg_scale.clamp(0.55, 0.90)).max(11.0)
+                } else {
+                    col_fs
+                };
+                // Cached vertical tokenization & measurement per (row_idx, font_bits, weight_bits).
+                let fs_bits = eff_fs.to_bits();
+                let tfs_bits = col_tfs.to_bits();
+                let wt_bits = snap.display.weight.to_bits();
+                let entry = self.vert_multi_cache.entry(v_idx).or_insert_with(|| {
+                    let toks = tokenize_vertical_row(r);
+                    let (st, th) = measure_vertical_steps(window, &toks, eff_fs, snap.display.weight);
+                    (fs_bits, wt_bits, Arc::new((toks, st, th)), None)
+                });
+                if entry.0 != fs_bits || entry.1 != wt_bits {
+                    let toks = tokenize_vertical_row(r);
+                    let (st, th) = measure_vertical_steps(window, &toks, eff_fs, snap.display.weight);
+                    *entry = (fs_bits, wt_bits, Arc::new((toks, st, th)), None);
+                }
+                let measured_main = Arc::clone(&entry.2);
+                let measured_trans = if has_trans {
+                    let need_t = entry.3.as_ref().is_none_or(|(tb, _)| *tb != tfs_bits);
+                    if need_t {
+                        let trans_row = Row {
+                            group: r.group,
+                            text: r.translation.clone(),
+                            words: Vec::new(),
+                            translation: String::new(),
+                            romanization: String::new(),
+                            start_ms: r.start_ms,
+                            end_ms: r.end_ms,
+                            word_timed: false,
+                            is_bg: false,
+                            is_duet: false,
+                        };
+                        let t_toks = tokenize_vertical_row(&trans_row);
+                        let (t_st, t_th) =
+                            measure_vertical_steps(window, &t_toks, col_tfs, snap.display.weight);
+                        entry.3 = Some((tfs_bits, Arc::new((t_toks, t_st, t_th))));
+                    }
+                    entry.3.as_ref().map(|(_, m)| Arc::clone(m))
+                } else {
+                    None
+                };
+                let target_scroll = if auto_scroll && measured_main.2 > vis_h {
+                    compute_vertical_scroll_target(
+                        &measured_main.0,
+                        &measured_main.1,
+                        measured_main.2,
+                        vis_h,
+                        live_pos_ms,
+                        r.start_ms,
+                        r.duration_ms(),
+                        r.word_timed,
+                    )
+                } else {
+                    0.0
+                };
+                let sc_entry = self.vert_col_scrolls.entry(v_idx).or_insert(target_scroll);
+                *sc_entry += (target_scroll - *sc_entry) * scroll_alpha;
+                if (*sc_entry - target_scroll).abs() < 0.2 {
+                    *sc_entry = target_scroll;
+                }
+                next_prev.push((
+                    v_idx,
+                    eff_fs,
+                    col_tfs,
+                    *sc_entry,
+                    slot_w,
+                    alpha,
+                    Arc::clone(&measured_main),
+                ));
+                cols.push(VertMultiCol {
+                    idx: v_idx,
+                    row: r.clone(),
+                    slot_left: cur_cx - slot_w * 0.5,
+                    slot_w,
+                    col_cx: main_cx,
+                    trans_cx,
+                    col_fs: eff_fs,
+                    col_tfs,
+                    alpha,
+                    scroll_y: *sc_entry,
+                    measured_main,
+                    measured_trans,
+                });
+            }
+            self.vert_prev_cols = next_prev;
+            let exit_v_ids: Vec<usize> = self.vert_exiting_cols.iter().map(|(i, ..)| *i).collect();
+            self.vert_col_springs
+                .retain(|i, _| v_indices.contains(i) || exit_v_ids.contains(i));
+            self.vert_col_alpha.retain(|i, _| v_indices.contains(i));
+            self.vert_col_scrolls.retain(|i, _| v_indices.contains(i));
+            self.vert_multi_cache.retain(|i, _| v_indices.contains(i));
+            cols
+        } else {
+            self.vert_col_springs.clear();
+            self.vert_col_alpha.clear();
+            self.vert_col_scrolls.clear();
+            self.vert_exiting_cols.clear();
+            self.vert_prev_cols.clear();
+            Vec::new()
+        };
+
         let toast_info = self.toast.as_ref().and_then(|(msg, until)| {
             if now >= *until {
                 None
@@ -2327,12 +2806,27 @@ impl Render for DesktopLyricsView {
         };
 
         let play_target = if snap.playing { 1.0 } else { 0.0 };
+        let amll_animating = !self.amll_exiting.is_empty()
+            || !self.vert_exiting_cols.is_empty()
+            || self
+                .amll_row_springs
+                .values()
+                .any(crate::player::model::RowMotion::pending)
+            || self
+                .amll_row_scales
+                .values()
+                .any(crate::player::model::RowMotion::pending)
+            || self
+                .vert_col_springs
+                .values()
+                .any(crate::player::model::RowMotion::pending);
         let animating = snap.playing
             || hovering
             || self.hover_alpha > 0.001
             || (self.bar_side_blend - target_bar_side).abs() > 0.001
             || (self.trans_right_blend - target_trans_right).abs() > 0.001
             || line_fade < 0.999
+            || amll_animating
             || (self.play_morph.position() - play_target).abs() > 0.002
             || interlude_snap.is_some()
             || toast_info.is_some()
@@ -2585,19 +3079,19 @@ impl Render for DesktopLyricsView {
                         let vert_area_left = 8.0_f32;
                         let vert_area_w = (win_w - 16.0).max(80.0);
 
-                        // 2. Native AMLL single-line lyric + translation OR InterludeDots OR fallback
-                        match (snap.active_row.as_ref(), shaped_active.as_ref()) {
-                            (Some(row), Some(shaped)) => match orient {
-                                DesktopOrientation::Horizontal => {
-                                    if !amll_multi.is_empty() {
+                        // 2. Native AMLL horizontal/vertical lyrics + inline InterludeDots OR fallback
+                        let render_horiz_multi =
+                            orient == DesktopOrientation::Horizontal && !amll_multi.is_empty();
+                        let render_vert_multi =
+                            orient == DesktopOrientation::Vertical && !vert_multi_cols.is_empty();
+                        if render_horiz_multi {
                                         let pad_x = 24.0_f32;
                                         let origin_x_box = (win_w - horiz_avail_w) * 0.5;
-                                        let area_bot = amll_area_top + amll_area_h;
                                         window.with_content_mask(
                                             Some(ContentMask {
                                                 bounds: gpui_kit::bounds(
-                                                    point(px(0.0), px(amll_area_top)),
-                                                    gpui_kit::size(px(win_w), px(amll_area_h)),
+                                                    point(px(0.0), px(0.0)),
+                                                    gpui_kit::size(px(win_w), px(win_h)),
                                                 ),
                                             }),
                                             |window| {
@@ -2605,6 +3099,8 @@ impl Render for DesktopLyricsView {
                                                     let r = &item.row;
                                                     let s = &item.shaped;
                                                     let cur_y = item.y;
+                                                    // Stable translation font size (matches layout measurement) so GPUI's
+                                                    // text layout & glyph caches hit 100% during scale spring transitions.
                                                     let row_tfs = (s.font_size * 0.58).clamp(10.5, 26.0);
                                                     let th = if show_trans && !r.translation.trim().is_empty() {
                                                         2.0 + row_tfs * 1.18
@@ -2612,69 +3108,62 @@ impl Render for DesktopLyricsView {
                                                         0.0
                                                     };
                                                     let row_bot = cur_y + s.line_height + th;
-                                                    if row_bot < amll_area_top - 4.0 || cur_y > area_bot + 4.0 {
+                                                    if row_bot < -8.0 || cur_y > win_h + 8.0 {
                                                         continue;
                                                     }
-                                                    let edge_fade_top = ((cur_y - amll_area_top + 10.0) / 22.0).clamp(0.0, 1.0);
-                                                    let edge_fade_bot = ((area_bot - row_bot + 14.0) / 26.0).clamp(0.0, 1.0);
-                                                    let edge_fade = edge_fade_top.min(edge_fade_bot);
-                                                    let is_main_active = Some(item.idx) == snap.active_row_index && !r.is_bg;
-                                                    let is_active = Some(item.idx) == snap.active_row_index
-                                                        || (!r.is_bg
-                                                            && live_pos_ms >= r.start_ms
-                                                            && live_pos_ms <= r.end_ms + 300.0)
-                                                        || (r.is_bg
-                                                            && live_pos_ms >= r.start_ms
-                                                            && live_pos_ms <= r.end_ms + 300.0);
-                                                    let dim = (if is_active {
-                                                        if r.is_bg { 0.86 } else { 1.0 }
-                                                    } else if r.is_bg {
-                                                        0.44
+                                                    let edge_fade_top = if cur_y < 0.0 {
+                                                        ((cur_y + 36.0) / 36.0).clamp(0.0, 1.0)
                                                     } else {
-                                                        snap.display.bg_opacity.clamp(0.32, 0.62)
-                                                    }) * item.bg_alpha
-                                                        * edge_fade;
+                                                        1.0
+                                                    };
+                                                    let edge_fade_bot = if row_bot > win_h {
+                                                        (((win_h + 36.0) - row_bot) / 36.0).clamp(0.0, 1.0)
+                                                    } else {
+                                                        1.0
+                                                    };
+                                                    let edge_fade = edge_fade_top.min(edge_fade_bot);
+                                                    let is_main_active = !item.exiting && Some(item.idx) == snap.active_row_index && !r.is_bg;
+                                                    let is_active = !item.exiting
+                                                        && (Some(item.idx) == snap.active_row_index
+                                                            || (live_pos_ms >= r.start_ms - 80.0
+                                                                && live_pos_ms <= r.end_ms + 260.0));
+                                                    let dim = if item.exiting {
+                                                        item.exit_dim * item.bg_alpha * edge_fade
+                                                    } else {
+                                                        (if is_active {
+                                                            if r.is_bg { 0.88 } else { 1.0 }
+                                                        } else if r.is_bg {
+                                                            0.50
+                                                        } else {
+                                                            snap.display.bg_opacity.max(0.54).clamp(0.54, 0.72)
+                                                        }) * item.bg_alpha
+                                                            * edge_fade
+                                                    };
                                                     if dim < 0.02 {
                                                         continue;
                                                     }
-                                                    let light = row_light(r, live_pos_ms, is_active, false, &snap.display);
-                                                    let progress = paint::line_progress(
+                                                    let mut row_light_val = paint::build_row_light(
+                                                        r,
+                                                        s,
                                                         live_pos_ms,
-                                                        r.start_ms,
-                                                        r.duration_ms(),
+                                                        is_active,
+                                                        dim,
+                                                        &snap.display,
                                                     );
-                                                    let masks: Vec<f32> = s
-                                                        .masks
-                                                        .iter()
-                                                        .map(|frames| position_at(frames, progress))
-                                                        .collect();
-                                                    let row_light_val = RowLight {
-                                                        base: (light.dark * dim).clamp(0.0, 1.0),
-                                                        dark: (light.dark * dim).clamp(0.0, 1.0),
-                                                        bright: (light.bright * dim).clamp(0.0, 1.0),
-                                                        mask: if is_active && light.sweep.is_some() {
-                                                            Some(masks)
-                                                        } else {
-                                                            None
-                                                        },
-                                                        glow: if is_active {
-                                                            light.glow.map(|mut g| {
-                                                                for v in &mut g {
-                                                                    *v *= dim;
-                                                                }
-                                                                g
-                                                            })
-                                                        } else {
-                                                            None
-                                                        },
-                                                    };
+                                                    // Keep active desktop lyric highlights crisp pure color (1.0 alpha),
+                                                    // and raise unplayed portion slightly so upcoming words stay readable.
+                                                    if is_active && !r.is_bg {
+                                                        row_light_val.bright = dim.clamp(0.0, 1.0);
+                                                        row_light_val.dark = row_light_val.dark.max(0.52 * dim);
+                                                        row_light_val.base = row_light_val.dark;
+                                                    }
                                                     let natural_w = s
                                                         .lines
                                                         .first()
                                                         .map(|l| f32::from(l.layout.width))
                                                         .unwrap_or(0.0);
                                                     let row_overflow = is_main_active && auto_scroll && natural_w > horiz_avail_w;
-                                                    let base_align = if amll_has_duet {
+                                                    let base_align = if display_lines > 1 && amll_has_duet {
                                                         if r.is_duet { LineAlign::Right } else { LineAlign::Left }
                                                     } else {
                                                         LineAlign::Center
@@ -2695,7 +3184,7 @@ impl Render for DesktopLyricsView {
                                                             &s.words,
                                                             &row_light_val,
                                                             live_pos_ms,
-                                                            1.0,
+                                                            item.scale,
                                                             WrapperTransform::default(),
                                                             -10000.0,
                                                             10000.0,
@@ -2721,9 +3210,9 @@ impl Render for DesktopLyricsView {
                                                         draw_row(window);
                                                     }
                                                     if show_trans && !r.translation.trim().is_empty() {
-                                                        let trans_a = (snap.display.trans_current.max(0.75) * dim)
+                                                        let trans_a = (snap.display.trans_current.max(0.78) * dim)
                                                             .clamp(0.0, 1.0);
-                                                        if amll_has_duet && !row_overflow {
+                                                        if display_lines > 1 && amll_has_duet && !row_overflow {
                                                             let t_text = r.translation.trim();
                                                             let (tw, _) = chrome::measure(window, t_text, row_tfs, 500.0);
                                                             let tx = if r.is_duet {
@@ -2748,118 +3237,137 @@ impl Render for DesktopLyricsView {
                                                         }
                                                     }
                                                 }
+                                                // Inline interlude breather squeezed between contextual rows in multi-line mode.
+                                                if let (Some(iy), Some(isnap)) = (amll_inline_interlude_y, interlude_snap.as_ref()) {
+                                                    let base_d = (font_size * 0.24 * snap.display.dot_scale).clamp(6.0, 14.0);
+                                                    let base_g = base_d * 0.72;
+                                                    let dark_text = is_dark_color(text_color);
+                                                    let shadow_rgb = if dark_text { 0xFFFFFF } else { 0x000000 };
+                                                    paint::paint_interlude_strip(
+                                                        window,
+                                                        win_w * 0.5,
+                                                        iy,
+                                                        base_d * isnap.scale as f32,
+                                                        base_g * isnap.scale as f32,
+                                                        [
+                                                            isnap.dot_opacities[0] as f32,
+                                                            isnap.dot_opacities[1] as f32,
+                                                            isnap.dot_opacities[2] as f32,
+                                                        ],
+                                                        isnap.opacity as f32,
+                                                        false,
+                                                        Some(text_color),
+                                                        Some((shadow_rgb, if dark_text { 0.0 } else { 1.5 })),
+                                                    );
+                                                }
                                             },
                                         );
-                                    } else {
-                                    let light =
-                                        row_light(row, live_pos_ms, true, false, &snap.display);
-                                    let progress = paint::line_progress(
-                                        live_pos_ms,
-                                        row.start_ms,
-                                        row.duration_ms(),
-                                    );
-                                    let masks: Vec<f32> = shaped
-                                        .masks
-                                        .iter()
-                                        .map(|frames| position_at(frames, progress))
-                                        .collect();
-                                    let row_light_val = RowLight {
-                                        base: light.dark * line_fade,
-                                        dark: light.dark * line_fade,
-                                        bright: light.bright * line_fade,
-                                        mask: if light.sweep.is_some() {
-                                            Some(masks)
+                        } else if render_vert_multi {
+                            for col in &vert_multi_cols {
+                                let clip_left = col.slot_left.max(0.0);
+                                let clip_right = (col.slot_left + col.slot_w).min(win_w);
+                                if clip_right <= clip_left + 1.0 {
+                                    continue;
+                                }
+                                let edge_fade_l = if col.slot_left < 0.0 {
+                                    ((col.slot_left + 36.0) / 36.0).clamp(0.0, 1.0)
+                                } else {
+                                    1.0
+                                };
+                                let edge_fade_r = if col.slot_left + col.slot_w > win_w {
+                                    (((win_w + 36.0) - (col.slot_left + col.slot_w)) / 36.0)
+                                        .clamp(0.0, 1.0)
+                                } else {
+                                    1.0
+                                };
+                                let col_alpha = col.alpha * edge_fade_l.min(edge_fade_r);
+                                if col_alpha < 0.02 {
+                                    continue;
+                                }
+                                let col_mask = ContentMask {
+                                    bounds: gpui_kit::bounds(
+                                        point(px(clip_left), px(0.0)),
+                                        gpui_kit::size(px((clip_right - clip_left).max(1.0)), px(win_h)),
+                                    ),
+                                };
+                                window.with_content_mask(Some(col_mask), |window| {
+                                    paint_vertical_text_column(
+                                        window,
+                                        col.col_cx,
+                                        win_h,
+                                        &col.row,
+                                        if Some(col.idx) == snap.active_row_index {
+                                            shaped_active.as_deref()
                                         } else {
                                             None
                                         },
-                                        glow: light.glow.map(|mut g| {
-                                            for v in &mut g {
-                                                *v *= line_fade;
-                                            }
-                                            g
-                                        }),
-                                    };
-                                    let has_trans =
-                                        show_trans && !row.translation.trim().is_empty();
-                                    let pad_x = 24.0_f32;
-                                    let natural_w = shaped
-                                        .lines
-                                        .first()
-                                        .map(|l| f32::from(l.layout.width))
-                                        .unwrap_or(0.0);
-                                    let horiz_overflow = auto_scroll && natural_w > horiz_avail_w;
-                                    let trans_fs = (shaped.font_size * 0.62).clamp(11.0, 40.0);
-                                    let total_h = if has_trans {
-                                        shaped.line_height + 4.0 + trans_fs * 1.25
-                                    } else {
-                                        shaped.line_height
-                                    };
-                                    let origin_y = horiz_area_top + (horiz_area_h - total_h) * 0.5;
-                                    let (origin_x, wrap_w, align) = if horiz_overflow {
-                                        (pad_x - horiz_main_scroll, natural_w + 32.0, LineAlign::Left)
-                                    } else {
-                                        ((win_w - horiz_avail_w) * 0.5, horiz_avail_w, LineAlign::Center)
-                                    };
-                                    let draw_main = |window: &mut Window| {
-                                        paint::paint_row_with_shadow(
+                                        &snap.display,
+                                        live_pos_ms,
+                                        col.col_fs,
+                                        text_color,
+                                        col_alpha,
+                                        1.0,
+                                        col.scroll_y,
+                                        Some(col.measured_main.as_ref()),
+                                    );
+                                    if let Some(trans_cx) = col.trans_cx {
+                                        let trans_row = Row {
+                                            group: col.row.group,
+                                            text: col.row.translation.clone(),
+                                            words: Vec::new(),
+                                            translation: String::new(),
+                                            romanization: String::new(),
+                                            start_ms: col.row.start_ms,
+                                            end_ms: col.row.end_ms,
+                                            word_timed: false,
+                                            is_bg: false,
+                                            is_duet: false,
+                                        };
+                                        paint_vertical_text_column(
                                             window,
-                                            shaped,
-                                            origin_x,
-                                            origin_y,
-                                            shaped.line_height,
-                                            shaped.font_size,
-                                            &shaped.words,
-                                            &row_light_val,
-                                            snap.position_ms,
-                                            1.0,
-                                            WrapperTransform::default(),
-                                            -10000.0,
-                                            10000.0,
-                                            1.0,
-                                            wrap_w,
-                                            align,
-                                            0.0,
-                                            DESKTOP_DROP_SHADOW,
-                                            Some(text_color),
-                                        );
-                                    };
-                                    if horiz_overflow {
-                                        window.with_content_mask(
-                                            Some(ContentMask {
-                                                bounds: gpui_kit::bounds(
-                                                    point(px(pad_x), px(0.0)),
-                                                    gpui_kit::size(px(horiz_avail_w), px(win_h)),
-                                                ),
-                                            }),
-                                            draw_main,
-                                        );
-                                    } else {
-                                        draw_main(window);
-                                    }
-                                    if has_trans {
-                                        let trans_a = (snap.display.trans_current.max(0.75)
-                                            * line_fade)
-                                            .clamp(0.0, 1.0);
-                                        paint_horiz_translation(
-                                            window,
-                                            &row.translation,
-                                            win_w,
-                                            origin_y + shaped.line_height + 4.0,
-                                            trans_fs,
+                                            trans_cx,
+                                            win_h,
+                                            &trans_row,
+                                            None,
+                                            &snap.display,
+                                            live_pos_ms,
+                                            col.col_tfs,
                                             text_color,
-                                            trans_a,
-                                            auto_scroll,
-                                            horiz_trans_scroll,
+                                            (snap.display.trans_current.max(0.78) * col_alpha)
+                                                .clamp(0.0, 1.0),
+                                            1.0,
+                                            col.scroll_y,
+                                            col.measured_trans.as_deref(),
                                         );
                                     }
-                                    }
-                                }
-                                DesktopOrientation::Vertical => {
+                                });
+                            }
+                            if let (Some(ix), Some(isnap)) = (vert_inline_interlude_x, interlude_snap.as_ref()) {
+                                let base_d = (font_size * 0.24 * snap.display.dot_scale).clamp(6.0, 14.0);
+                                let base_g = base_d * 0.72;
+                                let dark_text = is_dark_color(text_color);
+                                let shadow_rgb = if dark_text { 0xFFFFFF } else { 0x000000 };
+                                paint::paint_interlude_strip(
+                                    window,
+                                    ix.clamp(vert_area_left + 12.0, vert_area_left + vert_area_w - 12.0),
+                                    win_h * 0.5,
+                                    base_d * isnap.scale as f32,
+                                    base_g * isnap.scale as f32,
+                                    [
+                                        isnap.dot_opacities[0] as f32,
+                                        isnap.dot_opacities[1] as f32,
+                                        isnap.dot_opacities[2] as f32,
+                                    ],
+                                    isnap.opacity as f32,
+                                    true,
+                                    Some(text_color),
+                                    Some((shadow_rgb, if dark_text { 0.0 } else { 1.5 })),
+                                );
+                            }
+                        } else if let (Some(row), Some(shaped)) = (snap.active_row.as_ref(), shaped_active.as_ref()) {
+                            if orient == DesktopOrientation::Vertical {
                                     let has_trans =
                                         show_trans && !row.translation.trim().is_empty();
-                                    // Main lyric stays on screen outer side, translation on inner side:
-                                    // Left half of screen (trans_right_t = 0): main LEFT (0.34), translation RIGHT (0.72).
-                                    // Right half of screen (trans_right_t = 1): translation LEFT (0.28), main RIGHT (0.66).
                                     let main_cx = if has_trans {
                                         let left_half_main = vert_area_left + vert_area_w * 0.34;
                                         let right_half_main = vert_area_left + vert_area_w * 0.66;
@@ -2874,12 +3382,13 @@ impl Render for DesktopLyricsView {
                                         row,
                                         Some(shaped),
                                         &snap.display,
-                                        snap.position_ms,
+                                        live_pos_ms,
                                         vert_eff_main_fs,
                                         text_color,
                                         1.0,
                                         line_fade,
                                         vert_main_scroll,
+                                        None,
                                     );
                                     if has_trans {
                                         let left_half_trans = vert_area_left + vert_area_w * 0.72;
@@ -2905,17 +3414,17 @@ impl Render for DesktopLyricsView {
                                             &trans_row,
                                             None,
                                             &snap.display,
-                                            snap.position_ms,
+                                            live_pos_ms,
                                             vert_eff_trans_fs,
                                             text_color,
                                             snap.display.trans_current.max(0.75),
                                             line_fade,
                                             vert_trans_scroll,
+                                            None,
                                         );
                                     }
-                                }
-                            },
-                            _ => {
+                            }
+                        } else {
                                 if let Some(isnap) = interlude_snap.as_ref() {
                                     let (ix, iy) = match orient {
                                         DesktopOrientation::Horizontal => {
@@ -2925,15 +3434,25 @@ impl Render for DesktopLyricsView {
                                             (vert_area_left + vert_area_w * 0.5, win_h * 0.5)
                                         }
                                     };
-                                    paint_interlude_dots(
+                                    let base_d = (font_size * 0.28 * snap.display.dot_scale).clamp(7.0, 18.0);
+                                    let base_g = base_d * 0.72;
+                                    let dark_text = is_dark_color(text_color);
+                                    let shadow_rgb = if dark_text { 0xFFFFFF } else { 0x000000 };
+                                    paint::paint_interlude_strip(
                                         window,
-                                        orient,
                                         ix,
                                         iy,
-                                        font_size,
-                                        snap.display.dot_scale,
-                                        text_color,
-                                        isnap,
+                                        base_d * isnap.scale as f32,
+                                        base_g * isnap.scale as f32,
+                                        [
+                                            isnap.dot_opacities[0] as f32,
+                                            isnap.dot_opacities[1] as f32,
+                                            isnap.dot_opacities[2] as f32,
+                                        ],
+                                        isnap.opacity as f32,
+                                        orient == DesktopOrientation::Vertical,
+                                        Some(text_color),
+                                        Some((shadow_rgb, if dark_text { 0.0 } else { 1.5 })),
                                     );
                                 } else if snap.interlude_range.is_none() {
                                     let fallback = if !snap.track_title.is_empty() {
@@ -2988,11 +3507,11 @@ impl Render for DesktopLyricsView {
                                                 0.78,
                                                 1.0,
                                                 0.0,
+                                                None,
                                             );
                                         }
                                     }
                                 }
-                            }
                         }
 
                         // 3. Brief lock/unlock toast
@@ -3051,7 +3570,7 @@ pub(super) fn snap_axis(
     (raw.clamp(min_v, max_v), false)
 }
 
-fn snap_and_clamp_drag(
+pub(crate) fn snap_and_clamp_drag(
     raw_x: f32,
     raw_y: f32,
     win_w: f32,
@@ -3084,13 +3603,11 @@ fn snap_and_clamp_drag(
 
 
 
-/// Smartly selects strictly at most `max_lines` (2 or 3) visible lyric rows for
-/// horizontal multi-line desktop lyrics:
-/// 1. Keeps all currently active rows (lead vocal + overlapping next lead + active harmony).
-/// 2. If active rows < `max_lines` and the next upcoming line isn't urgent yet (>1.2s away),
-///    retains the just-finished previous row for continuity instead of dropping it abruptly.
-/// 3. Fills remaining slots with upcoming rows, or backfills earlier rows near song end.
-fn select_amll_multi_indices(
+/// Strictly forward-monotonic sliding window of at most `max_lines` (1..=3) visible rows:
+/// 1. Keeps currently active rows (lead vocal + overlapping next lead + active harmony).
+/// 2. Fills remaining slots strictly forward with upcoming rows (never re-inserting an
+///    already-finished row back at the top when overlapping vocals finish or at end-of-track).
+pub(super) fn select_amll_multi_indices(
     rows: &[Row],
     active_idx: Option<usize>,
     pos_ms: f64,
@@ -3105,17 +3622,40 @@ fn select_amll_multi_indices(
         if r.text.trim().is_empty() {
             continue;
         }
-        let active = if r.is_bg {
-            pos_ms >= r.start_ms - 250.0 && pos_ms <= r.end_ms + 350.0
-        } else {
-            pos_ms >= r.start_ms - 120.0 && pos_ms <= r.end_ms + 350.0
-        };
+        // Unified lead/tail window for main & harmony rows so a harmony row never
+        // activates earlier than its parent main line and evicts it.
+        let active = pos_ms >= r.start_ms - 120.0 && pos_ms <= r.end_ms + 300.0;
         if active {
-            selected.push(idx);
+            if r.is_bg {
+                // Ensure an active harmony row never orphans/skips its immediately preceding
+                // parent main line (e.g., if TTML harmony starts at or slightly before main).
+                if let Some(parent_idx) = rows[..idx]
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find(|(_, pr)| !pr.is_bg && !pr.text.trim().is_empty())
+                    .filter(|(_, pr)| pr.group == r.group || (r.start_ms - pr.start_ms).abs() <= 1500.0)
+                    .map(|(pi, _)| pi)
+                {
+                    if !selected.contains(&parent_idx) && pos_ms <= rows[parent_idx].end_ms + 300.0 {
+                        selected.push(parent_idx);
+                    }
+                }
+            }
+            if !selected.contains(&idx) {
+                selected.push(idx);
+            }
         }
     }
+    // Only inject `active_idx` if nothing is actively singing, OR if `active_idx` itself is
+    // still within its active tail (prevents stale `prev_before_next` fallback from resurrecting
+    // an already-finished line once the next line is active).
     if let Some(ai) = active_idx {
-        if ai < rows.len() && !rows[ai].text.trim().is_empty() && !selected.contains(&ai) {
+        if ai < rows.len()
+            && !rows[ai].text.trim().is_empty()
+            && !selected.contains(&ai)
+            && (selected.is_empty() || pos_ms <= rows[ai].end_ms + 300.0)
+        {
             selected.push(ai);
             selected.sort_unstable();
         }
@@ -3132,31 +3672,11 @@ fn select_amll_multi_indices(
         return selected[start..].to_vec();
     }
 
-    let first_sel = selected[0];
     let last_sel = *selected.last().unwrap();
-    let next_main_wait_ms = rows
-        .iter()
-        .enumerate()
-        .skip(last_sel + 1)
-        .find(|(_, r)| !r.is_bg && !r.text.trim().is_empty())
-        .map(|(_, r)| r.start_ms - pos_ms)
-        .unwrap_or(f64::INFINITY);
 
-    // If the next upcoming line isn't urgent yet, keep the just-finished previous row for context.
-    if next_main_wait_ms > 1200.0 && selected.len() < cap {
-        if let Some((prev_i, prev_r)) = rows[..first_sel]
-            .iter()
-            .enumerate()
-            .rev()
-            .find(|(_, r)| !r.text.trim().is_empty())
-        {
-            if pos_ms - prev_r.end_ms <= 3500.0 {
-                selected.insert(0, prev_i);
-            }
-        }
-    }
-
-    // Fill remaining slots with upcoming rows (main rows + imminent harmony rows).
+    // Fill remaining slots strictly forward with upcoming rows (main rows + imminent harmony).
+    // If an upcoming harmony row isn't imminent yet (>1.5s away), STOP instead of jumping over
+    // it to pull a later main line that would just get pushed back out when the harmony arrives.
     for (idx, r) in rows.iter().enumerate().skip(last_sel + 1) {
         if selected.len() >= cap {
             break;
@@ -3165,27 +3685,65 @@ fn select_amll_multi_indices(
             continue;
         }
         if r.is_bg && r.start_ms > pos_ms + 1500.0 {
-            continue;
+            break;
         }
         selected.push(idx);
-    }
-
-    // Near the end of the track, backfill from earlier non-empty rows.
-    if selected.len() < cap {
-        let cur_first = selected[0];
-        for (idx, r) in rows[..cur_first].iter().enumerate().rev() {
-            if selected.len() >= cap {
-                break;
-            }
-            if r.is_bg || r.text.trim().is_empty() {
-                continue;
-            }
-            selected.insert(0, idx);
-        }
     }
 
     selected.sort_unstable();
     selected.dedup();
     selected.truncate(cap);
     selected
+}
+
+fn desktop_spring_params(feel: crate::player::model::SpringFeel) -> SpringParams {
+    match feel {
+        crate::player::model::SpringFeel::Lively => SpringParams::new(185.0, 27.0),
+        crate::player::model::SpringFeel::Soft => SpringParams::new(92.0, 19.5),
+        crate::player::model::SpringFeel::Standard => SpringParams::new(125.0, 22.5),
+    }
+}
+
+/// Frames `[prev_main (if any), next_main, next_main+1]` during an interlude in multi-line mode
+/// so the 3-dot breather sits cleanly between the finished line and the upcoming line.
+fn select_interlude_multi_indices(
+    rows: &[Row],
+    active_idx: Option<usize>,
+    pos_ms: f64,
+    max_lines: usize,
+) -> Vec<usize> {
+    let next_idx = rows
+        .iter()
+        .enumerate()
+        .find(|(_, r)| !r.is_bg && !r.text.trim().is_empty() && r.start_ms > pos_ms)
+        .map(|(i, _)| i);
+    let prev_idx = rows
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, r)| !r.is_bg && !r.text.trim().is_empty() && r.end_ms <= pos_ms + 300.0)
+        .map(|(i, _)| i);
+    let mut v = Vec::with_capacity(max_lines);
+    if let Some(pi) = prev_idx {
+        v.push(pi);
+    }
+    if let Some(ni) = next_idx {
+        if !v.contains(&ni) && v.len() < max_lines {
+            v.push(ni);
+        }
+        for (idx, r) in rows.iter().enumerate().skip(ni + 1) {
+            if v.len() >= max_lines {
+                break;
+            }
+            if r.is_bg || r.text.trim().is_empty() {
+                continue;
+            }
+            v.push(idx);
+        }
+    }
+    if v.is_empty() {
+        select_amll_multi_indices(rows, active_idx, pos_ms, max_lines)
+    } else {
+        v
+    }
 }

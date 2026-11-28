@@ -24,14 +24,13 @@ use oly_core::interlude::InterludeDots;
 use oly_core::scroll::{Spring, SpringParams};
 use oly_render::emphasis::{PlainFloat, sample_float, sample_glow};
 use oly_render::glass::Rect as GlassRect;
-use oly_render::mask::position_at;
 
 use super::chrome::{self, SegmentedLens};
 use super::elastic::{Elastic, PressGesture};
 use super::icons::{self, Icon};
 use super::interaction::{Feedback, state_icon_spring};
-use super::model::{Box4, Display, Row, ThemeMode, row_light};
-use super::paint::{self, LineAlign, RowLight, WrapperTransform};
+use super::model::{Box4, Display, Row, ThemeMode};
+use super::paint::{self, LineAlign, WrapperTransform};
 use super::panel_motion::PanelMotion;
 use super::rows::{RowLines, Shaper};
 use super::view::{
@@ -95,6 +94,7 @@ pub use bridge::*;
 pub use config::*;
 pub use vertical::*;
 pub use view::*;
+pub(crate) use popovers::{DesktopLyricsPickerPopover, DesktopVolumePopover, VOLUME_POPOVER_H, VOLUME_POPOVER_W};
 use popovers::*;
 
 #[cfg(test)]
@@ -249,5 +249,86 @@ mod tests {
         let b = bridge.read_snapshot();
         assert!(Arc::ptr_eq(&a, &b));
         assert_eq!(a.track_title, "ZeroCopy");
+    }
+
+    #[::std::prelude::v1::test]
+    fn multi_line_selection_stays_monotonic_after_overlap_ends() {
+        let mk = |group: usize, text: &str, start_ms: f64, end_ms: f64| Row {
+            group,
+            text: text.into(),
+            words: Vec::new(),
+            translation: String::new(),
+            romanization: String::new(),
+            start_ms,
+            end_ms,
+            word_timed: false,
+            is_bg: false,
+            is_duet: false,
+        };
+        let rows = vec![
+            mk(0, "Line 0", 0.0, 4000.0),
+            mk(1, "Line 1", 3000.0, 8000.0),
+            mk(2, "Line 2", 11000.0, 14000.0),
+        ];
+        assert_eq!(select_amll_multi_indices(&rows, Some(1), 3500.0, 2), vec![0, 1]);
+        assert_eq!(select_amll_multi_indices(&rows, Some(1), 5000.0, 2), vec![1, 2]);
+    }
+
+    #[::std::prelude::v1::test]
+    fn multi_line_selection_does_not_leapfrog_pending_harmony() {
+        let mk = |group: usize, text: &str, start_ms: f64, end_ms: f64, is_bg: bool| Row {
+            group,
+            text: text.into(),
+            words: Vec::new(),
+            translation: String::new(),
+            romanization: String::new(),
+            start_ms,
+            end_ms,
+            word_timed: false,
+            is_bg,
+            is_duet: false,
+        };
+        let rows = vec![
+            mk(0, "Main 1", 0.0, 4000.0, false),
+            mk(1, "Main 2", 4000.0, 8000.0, false),
+            mk(1, "Harmony 2", 6500.0, 8000.0, true),
+            mk(2, "Main 3", 8000.0, 12000.0, false),
+        ];
+        // At t=1000ms, Harmony 2 is >1.5s away: must NOT pull Main 3 past Harmony 2.
+        assert_eq!(select_amll_multi_indices(&rows, Some(0), 1000.0, 3), vec![0, 1]);
+        // At t=4500ms (Main 1 ended past 300ms tail, Main 2 active, Harmony 2 >1.5s away): must NOT backfill Main 1!
+        assert_eq!(select_amll_multi_indices(&rows, Some(1), 4500.0, 3), vec![1]);
+        // Once Harmony 2 is within 1.5s (t=5500ms), it enters cleanly without displacing Main 3.
+        assert_eq!(select_amll_multi_indices(&rows, Some(1), 5500.0, 3), vec![1, 2, 3]);
+    }
+
+    #[::std::prelude::v1::test]
+    fn multi_line_selection_harmony_never_evicts_parent_or_resurrects_exited_row() {
+        let mk = |group: usize, text: &str, start_ms: f64, end_ms: f64, is_bg: bool| Row {
+            group,
+            text: text.into(),
+            words: Vec::new(),
+            translation: String::new(),
+            romanization: String::new(),
+            start_ms,
+            end_ms,
+            word_timed: false,
+            is_bg,
+            is_duet: false,
+        };
+        let rows = vec![
+            mk(0, "Another fortnight", 0.0, 4000.0, false),
+            mk(1, "Move to Florida", 4000.0, 8000.0, false),
+            mk(1, "Florida, car you want", 3950.0, 8600.0, true),
+            mk(2, "But it won't start up", 8500.0, 14000.0, false),
+            mk(2, "Won't start up", 8500.0, 13000.0, true),
+        ];
+        // Even if harmony starts 50ms before its parent main row, parent main row MUST stay in window.
+        assert_eq!(select_amll_multi_indices(&rows, Some(0), 3850.0, 3), vec![0, 1, 2]);
+        // While previous harmony (2) finishes and final pair (3, 4) starts -> [2, 3, 4].
+        assert_eq!(select_amll_multi_indices(&rows, Some(1), 8700.0, 3), vec![2, 3, 4]);
+        // Once previous harmony (2) finishes at end-of-track, MUST NOT resurrect exited row (1)
+        // even if stale active_idx is still Some(1).
+        assert_eq!(select_amll_multi_indices(&rows, Some(1), 9000.0, 3), vec![3, 4]);
     }
 }

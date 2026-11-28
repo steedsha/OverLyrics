@@ -9,5 +9,5 @@ pub(super) use color::DesktopColorPopover;
 pub(super) use more::{
     DesktopDisplayPopover, DesktopLinesPopover, DesktopMorePopover, PaletteDrag, paint_hsv_palette,
 };
-pub(super) use picker::DesktopLyricsPickerPopover;
-pub(super) use volume::DesktopVolumePopover;
+pub(crate) use picker::DesktopLyricsPickerPopover;
+pub(crate) use volume::{DesktopVolumePopover, VOLUME_POPOVER_H, VOLUME_POPOVER_W};

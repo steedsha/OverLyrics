@@ -297,21 +297,22 @@ pub(super) fn paint_frame(
         if let Some(inter) = &plan.interlude {
             let d = inter.dot_diameter * inter.scale;
             let g = inter.dot_gap * inter.scale;
-            if d > 0.0 && inter.opacity > 0.001 {
-                let strip_w = inter.dot_diameter * 3.0 + inter.dot_gap * 2.0;
-                let cx = inter.x + strip_w * 0.5;
-                let cy = inter.y + inter.dot_diameter * 0.5;
-                let start_x = cx - (d * 3.0 + g * 2.0) * 0.5;
-                let dy = cy - d * 0.5;
-                let feather = paint::feather(cy, feather_top, lyric_bottom, m.feather_px);
-                for i in 0..3 {
-                    let alpha = (inter.opacity * inter.dot_opacities[i] * feather).clamp(0.0, 1.0);
-                    if alpha > 0.001 {
-                        let dx = start_x + i as f32 * (d + g);
-                        chrome::fill_round_subpixel(window, dx, dy, d, d, d * 0.5, chrome::text(alpha));
-                    }
-                }
-            }
+            let strip_w = inter.dot_diameter * 3.0 + inter.dot_gap * 2.0;
+            let cx_i = inter.x + strip_w * 0.5;
+            let cy_i = inter.y + inter.dot_diameter * 0.5;
+            let feather = paint::feather(cy_i, feather_top, lyric_bottom, m.feather_px);
+            paint::paint_interlude_strip(
+                window,
+                cx_i,
+                cy_i,
+                d,
+                g,
+                inter.dot_opacities,
+                inter.opacity * feather,
+                false,
+                None,
+                None,
+            );
         }
         if let Some(bottom) = &plan.bottom {
             for (i, line) in bottom.lines.lines.iter().enumerate() {
@@ -391,8 +392,17 @@ pub(super) fn paint_frame(
         let title_y = if compact { m.cover_meta_top } else { m.cover_meta_top - 3.0 * ws };
         let artist_y = if compact { m.cover_meta_top + 28.0 } else { m.cover_meta_top + 25.0 * ws };
         let meta_a = if plan.mode == Mode::Window { cover_alpha } else { fg_alpha };
-        chrome::paint_text_fitted(window,&plan.track_title,x,title_y,width,title_size,650.,chrome::text(0.96 * meta_a));
-        chrome::paint_text_fitted(window,&plan.track_artist,x,artist_y,width,artist_size,if compact{500.}else{420.},chrome::text((if compact{0.60}else{0.66}) * meta_a));
+        if plan.wallpaper_mode && plan.mode == Mode::Window {
+            let center_x = m.cover.x + m.cover.w * 0.5;
+            let max_w = (m.cover.w * 1.15).max(width);
+            let title_w = chrome::measure(window, &plan.track_title, title_size, 650.0).0.min(max_w);
+            let artist_w = chrome::measure(window, &plan.track_artist, artist_size, 420.0).0.min(max_w);
+            chrome::paint_text_fitted(window, &plan.track_title, center_x - title_w * 0.5, title_y, max_w, title_size, 650., chrome::text(0.96 * meta_a));
+            chrome::paint_text_fitted(window, &plan.track_artist, center_x - artist_w * 0.5, artist_y, max_w, artist_size, 420., chrome::text(0.66 * meta_a));
+        } else {
+            chrome::paint_text_fitted(window,&plan.track_title,x,title_y,width,title_size,650.,chrome::text(0.96 * meta_a));
+            chrome::paint_text_fitted(window,&plan.track_artist,x,artist_y,width,artist_size,if compact{500.}else{420.},chrome::text((if compact{0.60}else{0.66}) * meta_a));
+        }
     }
 
     // 5. Playbar: one 6px rail across the column and the two time labels under
@@ -1125,7 +1135,7 @@ pub(in crate::player) fn paint_sidecar_glass_frame(
         r.h,
         radius,
         1.0,
-        chrome::themed_border(0.16 * surface_alpha),
+        chrome::themed_border(0.18 * surface_alpha),
     );
 }
 
@@ -1437,7 +1447,7 @@ pub(in crate::player) fn paint_lyrics_picker_contents(
 }
 
 
-pub(super) fn offset_label(ms: i64) -> String {
+pub(in crate::player) fn offset_label(ms: i64) -> String {
     if ms > 0 {
         format!("+{ms}ms")
     } else {

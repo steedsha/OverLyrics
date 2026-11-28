@@ -317,9 +317,9 @@ mod separation_tests {
             ]
         );
         assert_eq!(settings.value("beatFollow"), json!(true));
-        assert_eq!(settings.value("beatFlashThreshold"), json!(1.02));
+        assert_eq!(settings.value("beatFlashThreshold"), json!(1.08));
         assert_eq!(settings.value("beatFlashStrength"), json!(1.2));
-        assert_eq!(settings.value("beatWobbleThreshold"), json!(1.3));
+        assert_eq!(settings.value("beatWobbleThreshold"), json!(1.25));
         assert_eq!(settings.value("beatWobbleStrength"), json!(1.2));
 
         settings.set("beatFlashThreshold", json!(1.35), 1., false);

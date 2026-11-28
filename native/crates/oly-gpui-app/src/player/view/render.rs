@@ -233,7 +233,11 @@ impl Render for PlayerView {
                 }
             }
         }
-        let mut render_mode = self.tool.mode().unwrap_or(Mode::Window);
+        let mut render_mode = if self.wallpaper_mode {
+            Mode::Window
+        } else {
+            self.tool.mode().unwrap_or(Mode::Window)
+        };
         let mut content_alpha = 1.0_f32;
         let mut chrome_alpha = 1.0_f32;
         let step_now = self.now_ms();
@@ -327,12 +331,60 @@ impl Render for PlayerView {
                 .to_string();
             if !self.last_wallpaper_display.is_empty()
                 && cur_wp_disp != self.last_wallpaper_display
-                && !self.wallpaper_windows.is_empty()
+                && self.wallpaper_mode
             {
-                self.exit_wallpaper_mode(cx, false);
-                self.pending_wallpaper_enter = true;
+                self.pending_wallpaper_reattach = true;
             }
             self.last_wallpaper_display = cur_wp_disp;
+            if self.wallpaper_mode {
+                let taskbar_gen = self
+                    .wallpaper_bridge
+                    .taskbar_recreated_gen
+                    .load(std::sync::atomic::Ordering::SeqCst);
+                if self.pending_wallpaper_reattach || taskbar_gen != self.wallpaper_attached_gen {
+                    self.pending_wallpaper_reattach = false;
+                    self.wallpaper_attached_gen = taskbar_gen;
+                    if let (Some(hwnd), Some(target)) =
+                        (self.main_hwnd, self.resolve_wallpaper_display(window, cx))
+                    {
+                        let b = target.bounds();
+                        let sf = window.scale_factor().max(1.0);
+                        let phys_rect = (
+                            (f32::from(b.origin.x) * sf).round() as i32,
+                            (f32::from(b.origin.y) * sf).round() as i32,
+                            (f32::from(b.size.width).max(1.0) * sf).round().max(1.0) as i32,
+                            (f32::from(b.size.height).max(1.0) * sf).round().max(1.0) as i32,
+                        );
+                        self.wallpaper_target_phys = phys_rect;
+                        let (x, y, w_px, h_px) = phys_rect;
+                        window.defer(cx, move |_, _| {
+                            crate::player::wallpaper::win32_workerw::attach_to_workerw(
+                                hwnd, x, y, w_px, h_px,
+                            );
+                        });
+                    }
+                }
+                if self.playing {
+                    self.wallpaper_paused_since_ms = None;
+                } else if self.wallpaper_paused_since_ms.is_none() {
+                    self.wallpaper_paused_since_ms = Some(now);
+                }
+                if now - self.wallpaper_last_occlusion_ms >= 260.0 {
+                    self.wallpaper_last_occlusion_ms = now;
+                    let own = self.wallpaper_bridge.own_hwnds();
+                    self.wallpaper_occluded =
+                        crate::player::wallpaper::win32_workerw::is_desktop_occluded_or_locked(
+                            self.wallpaper_target_phys,
+                            &own,
+                        );
+                }
+                let pause_slept = self
+                    .wallpaper_paused_since_ms
+                    .is_some_and(|t| now - t >= 30_000.0);
+                self.wallpaper_sleeping = self.wallpaper_occluded || pause_slept;
+            } else {
+                self.wallpaper_sleeping = false;
+            }
         }
         self.settings.tick(now);
         if let Some(host)=self.settings_host.as_mut(){
@@ -609,7 +661,9 @@ impl Render for PlayerView {
         } else {
             self.playing
         };
-        let immersion=self.display.immersion_background && (matches!(render_mode,Mode::Window) || self.display.immersion_compact);
+        let immersion = self.wallpaper_mode
+            || (self.display.immersion_background
+                && (matches!(render_mode, Mode::Window) || self.display.immersion_compact));
         let render_bg = immersion && self.settings_host.is_none();
         if let Some(scene) = self.scene.as_mut() {
             if let Some(path) = motion_path {
@@ -618,14 +672,14 @@ impl Render for PlayerView {
                 }
             }
             scene.set_beat(crate::player::scene::BeatConfig {
-                active: render_bg,
+                active: render_bg && !self.wallpaper_sleeping,
                 enabled: self.display.beat_follow,
                 flash_threshold: self.display.beat_flash_threshold,
                 flash_strength: self.display.beat_flash_strength,
                 wobble_threshold: self.display.beat_wobble_threshold,
                 wobble_strength: self.display.beat_wobble_strength,
             });
-            if render_bg {
+            if render_bg && !self.wallpaper_sleeping {
                 // Cap blurred immersion background target to 1280px longest edge
                 // to save up to 9x VRAM & fragment work on 2K/4K displays.
                 let max_edge = phys.0.max(phys.1);
@@ -640,7 +694,7 @@ impl Render for PlayerView {
                 };
                 scene.resize(bg_w, bg_h);
             }
-            if window.is_visible(){
+            if window.is_visible() && !self.wallpaper_sleeping {
                 if let Err(error) = scene.tick(now, self.position_ms, tick_playing, render_bg) {log::warn!("scene tick: {error:#}");}
             }
         }
@@ -773,7 +827,10 @@ impl Render for PlayerView {
             chrome.more.y += slide_y;
             chrome.progress.y += slide_y;
         }
-        let nocover_island = render_mode == Mode::Window && !self.display.show_cover && self.settings_host.is_none();
+        let nocover_island = render_mode == Mode::Window
+            && !self.display.show_cover
+            && self.settings_host.is_none()
+            && !self.wallpaper_mode;
         if nocover_island && cover_vis <= 0.01 {
             if self.cover_gone_at_ms.is_none() {
                 self.cover_gone_at_ms = Some(now);
@@ -1443,8 +1500,9 @@ impl Render for PlayerView {
             }
             feedback_pending |= response.pending();
         }
-        let chrome_visible = !matches!(render_mode, Mode::Lyrics | Mode::Album)
-            || self.compact_chrome_alpha > 0.005;
+        let chrome_visible = !self.wallpaper_mode
+            && (!matches!(render_mode, Mode::Lyrics | Mode::Album)
+                || self.compact_chrome_alpha > 0.005);
         let hover_viewport = Box4::new(m.lyric_viewport.x, m.lyric_viewport.y,
             m.lyric_viewport.w, (m.lyric_viewport.h - if render_mode == Mode::Lyrics && chrome_visible {164.} else {0.}).max(0.));
         let hovered_lyric = if lyrics_alpha <= 0.01 {
@@ -2042,7 +2100,7 @@ impl Render for PlayerView {
             motion: if motion_alpha > 0.001 { self.motion_surface } else { None },
             motion_alpha,
             rows: plan_rows,
-            lyric_hover,
+            lyric_hover: if self.wallpaper_mode { None } else { lyric_hover },
             interlude: plan_interlude,
             bottom: plan_bottom,
             panels,
@@ -2094,24 +2152,25 @@ impl Render for PlayerView {
             picker_kind: self.picker_kind,
             show_media_row: show_media,
             show_wallpaper_row: show_wallpaper,
+            wallpaper_mode: self.wallpaper_mode,
             picker_refresh_angle: self.picker_refresh_angle,
             mode: render_mode,
-            fullscreen: render_fullscreen,
+            fullscreen: render_fullscreen || self.wallpaper_mode,
             control_pending: self.live.as_ref().is_some_and(|l| l.model.control_pending()),
             lyrics_visible: !self.lyrics_hidden(),
             lyrics_alpha,
             smart_switch_fractions,
             cover_switch_fractions,
             empty_notice,
-            island: island_plan,
-            island_glass_panel,
+            island: if self.wallpaper_mode { None } else { island_plan },
+            island_glass_panel: if self.wallpaper_mode { None } else { island_glass_panel },
             display: display_for_plan,
             settings_paint,
-            scroll_glass,
-            scroll_line,
-            slider_lens,
-            button_lens,
-            window_controls_alpha: self.window_controls_alpha,
+            scroll_glass: if self.wallpaper_mode { None } else { scroll_glass },
+            scroll_line: if self.wallpaper_mode { None } else { scroll_line },
+            slider_lens: if self.wallpaper_mode { None } else { slider_lens },
+            button_lens: if self.wallpaper_mode { None } else { button_lens },
+            window_controls_alpha: if self.wallpaper_mode { 0.0 } else { self.window_controls_alpha },
             mode_well_rect,
             mode_lens_rect,
             mode_swell,
@@ -2188,6 +2247,7 @@ impl Render for PlayerView {
             self.settings_child_view = None;
         }
         let cursor_can_hide = self.settings_host.is_none()
+            && !self.wallpaper_mode
             && !sidecar_open
             && matches!(render_mode, Mode::Window | Mode::Lyrics)
             && !self.tool.panels().any_open()
@@ -2209,7 +2269,7 @@ impl Render for PlayerView {
         {
             window.request_animation_frame();
         }
-        if animating && window.is_visible() {
+        if animating && window.is_visible() && !self.wallpaper_sleeping {
             window.request_animation_frame();
         } else {
             if self.source == Source::Live && !self.live_poll_pending {

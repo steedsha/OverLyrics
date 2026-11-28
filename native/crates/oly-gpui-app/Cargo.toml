@@ -23,6 +23,7 @@ oly-contracts.workspace = true
 oly-core.workspace = true
 oly-engine.workspace = true
 base64 = "0.22"
+flate2 = "1"
 oly-render.workspace = true
 oly-ui.workspace = true
 oly-platform-win.workspace = true

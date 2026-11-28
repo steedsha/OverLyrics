@@ -1,7 +1,7 @@
 use super::*;
 
 /// Independent Liquid Glass Lyrics Version Picker popover — reuses `paint_lyrics_picker_contents`!
-pub(in crate::player::desktop_lyrics) struct DesktopLyricsPickerPopover {
+pub(crate) struct DesktopLyricsPickerPopover {
     bridge: Arc<SharedDesktopBridge>,
     motion: PanelMotion,
     cursor: Option<(f32, f32)>,
@@ -20,7 +20,7 @@ pub(in crate::player::desktop_lyrics) struct DesktopLyricsPickerPopover {
 }
 
 impl DesktopLyricsPickerPopover {
-    pub(in crate::player::desktop_lyrics) fn new(bridge: Arc<SharedDesktopBridge>) -> Self {
+    pub(crate) fn new(bridge: Arc<SharedDesktopBridge>) -> Self {
         let mut scroll_spring = Spring::new(0.0);
         scroll_spring.update_params(SpringParams::new(220.0, 26.0));
         Self {

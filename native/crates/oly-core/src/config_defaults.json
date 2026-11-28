@@ -19,7 +19,7 @@
     "fontSize": 68,
     "transFontSize": 100,
     "fontFamily": "Pretendard",
-    "transFontFamily": "檎風黑體 CHS",
+    "transFontFamily": "檎风黑体 CHS",
     "fontWeight": 700,
     "transFontWeight": 500,
     "letterSpacing": 0.005,
@@ -81,9 +81,9 @@
     "windowBackground": "immersion",
     "immersionCompact": false,
     "beatFollow": true,
-    "beatFlashThreshold": 1.02,
+    "beatFlashThreshold": 1.08,
     "beatFlashStrength": 1.2,
-    "beatWobbleThreshold": 1.3,
+    "beatWobbleThreshold": 1.25,
     "beatWobbleStrength": 1.2,
     "coverRadius": 40,
     "coverShadow": true,
@@ -221,6 +221,7 @@
       "amlldb": true
     },
     "sourceOrder": [
+      "custom",
       "amlldb",
       "qq",
       "kugou",

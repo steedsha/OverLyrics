@@ -17,11 +17,10 @@ use gpui_kit::*;
 use super::chrome;
 use super::elastic::{Elastic, PressGesture};
 use super::icons::{self, Icon};
-use super::interaction::{Feedback, state_icon_spring};
+use super::interaction::Feedback;
 use super::model::{Box4, ThemeMode};
 use super::panel_motion::PanelMotion;
 use super::win32_window;
-use oly_core::scroll::Spring;
 
 const TRAY_MENU_PAD: f32 = 12.0;
 pub const TRAY_MENU_CARD_W: f32 = 216.0;
@@ -375,7 +374,6 @@ pub fn is_hwnd_visible(raw_hwnd: isize) -> bool {
 pub struct TrayMenuPopover {
     bridge: Arc<SharedTrayBridge>,
     motion: PanelMotion,
-    lock_spring: Spring,
     feedback: HashMap<TrayAction, Feedback>,
     elastics: HashMap<TrayAction, Elastic>,
     panel_elastic: Elastic,
@@ -393,11 +391,9 @@ pub struct TrayMenuPopover {
 
 impl TrayMenuPopover {
     pub fn new(bridge: Arc<SharedTrayBridge>) -> Self {
-        let locked = bridge.read_snapshot().desktop_locked;
         Self {
             bridge,
             motion: PanelMotion::default(),
-            lock_spring: state_icon_spring(if locked { 1.0 } else { 0.0 }),
             feedback: HashMap::new(),
             elastics: HashMap::new(),
             panel_elastic: Elastic::default(),
@@ -495,11 +491,6 @@ impl Render for TrayMenuPopover {
         let r_settings = Box4::new(row_x, div1_y + 6.0, row_w, row_h);
         let div2_y = r_settings.bottom() + 4.0;
         let r_quit = Box4::new(row_x, div2_y + 6.0, row_w, row_h);
-
-        self.lock_spring
-            .set_target_position(if snap.desktop_locked { 1.0 } else { 0.0 });
-        self.lock_spring.update(dt / 1000.0);
-        let lock_frac = self.lock_spring.position().clamp(0.0, 1.0) as f32;
 
         let mut hits = vec![
             (TrayAction::ShowMain, r_show),
@@ -684,43 +675,15 @@ impl Render for TrayMenuPopover {
                         paint_row(window, cx, TrayAction::ToggleDesktopLyrics, r_desk, Icon::DesktopLyrics, "桌面歌词", snap.desktop_open, false);
 
                         if let Some(rl) = r_lock {
-                            let lf = fb_map.get(&TrayAction::ToggleDesktopLock).copied().unwrap_or_default();
-                            if lf.hover > 0.01 || lf.press > 0.01 {
-                                let hover_bg = if dark_card {
-                                    hsla(0.0, 0.0, 1.0, (0.09 * lf.hover + 0.05 * lf.press) * cont_a)
-                                } else {
-                                    hsla(0.0, 0.0, 0.0, (0.06 * lf.hover + 0.04 * lf.press) * cont_a)
-                                };
-                                chrome::fill_round(window, rl.x, rl.y, rl.w, rl.h, 8.0, hover_bg);
-                            }
-                            icons::paint(
+                            paint_row(
                                 window,
                                 cx,
+                                TrayAction::ToggleDesktopLock,
+                                rl,
                                 if snap.desktop_locked { Icon::Lock } else { Icon::Unlock },
-                                Box4::new(card.x + 14.0, rl.y + (rl.h - 16.0) * 0.5, 16.0, 16.0),
-                                fg_icon,
-                            );
-                            chrome::paint_text_vcentred(
-                                window,
-                                "锁定桌面歌词",
-                                card.x + 38.0,
-                                rl.centre().1,
-                                12.5,
-                                500.0,
-                                fg_main,
-                            );
-                            let track = Box4::new(card.right() - 46.0, rl.centre().1 - 10.0, 36.0, 20.0);
-                            chrome::paint_switch_with_accent(
-                                window,
-                                track.x,
-                                track.y,
-                                track.w,
-                                track.h,
+                                "锁定歌词",
                                 snap.desktop_locked,
-                                lock_frac,
-                                lf,
-                                accent_hex,
-                                cont_a,
+                                false,
                             );
                         }
 

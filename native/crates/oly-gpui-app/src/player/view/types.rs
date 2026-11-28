@@ -475,6 +475,7 @@ pub(super) struct Plan {
     pub(super) picker_kind: PickerKind,
     pub(super) show_media_row: bool,
     pub(super) show_wallpaper_row: bool,
+    pub(super) wallpaper_mode: bool,
     pub(super) picker_refresh_angle: f32,
     pub(super) control_pending: bool,
     pub(super) lyrics_visible: bool,

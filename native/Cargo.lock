@@ -5052,7 +5052,7 @@ dependencies = [
 
 [[package]]
 name = "oly-contracts"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -5060,7 +5060,7 @@ dependencies = [
 
 [[package]]
 name = "oly-core"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "oly-contracts",
  "serde",
@@ -5069,7 +5069,7 @@ dependencies = [
 
 [[package]]
 name = "oly-engine"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "base64 0.22.1",
  "flate2",
@@ -5082,12 +5082,13 @@ dependencies = [
 
 [[package]]
 name = "oly-gpui-app"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
  "embed-resource",
  "env_logger",
+ "flate2",
  "gpui-kit",
  "image",
  "log",
@@ -5105,7 +5106,7 @@ dependencies = [
 
 [[package]]
 name = "oly-platform-win"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "log",
@@ -5122,7 +5123,7 @@ dependencies = [
 
 [[package]]
 name = "oly-qa"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "env_logger",
@@ -5138,7 +5139,7 @@ dependencies = [
 
 [[package]]
 name = "oly-render"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "env_logger",
@@ -5155,7 +5156,7 @@ dependencies = [
 
 [[package]]
 name = "oly-ui"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "gpui-kit",

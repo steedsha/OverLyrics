@@ -59,7 +59,31 @@ pub fn search_dirs() -> Vec<PathBuf> {
     out
 }
 
-/// Read every `.ttf`/`.otf` the search finds. Duplicate file names keep the
+fn decode_font_bytes(path: &Path, raw: Vec<u8>) -> Option<Vec<u8>> {
+    let lower = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(str::to_ascii_lowercase)?;
+    if lower.ends_with(".gz") {
+        use std::io::Read;
+        let mut dec = flate2::read::GzDecoder::new(raw.as_slice());
+        let mut out = Vec::with_capacity(raw.len() * 2);
+        dec.read_to_end(&mut out).ok()?;
+        Some(out)
+    } else {
+        Some(raw)
+    }
+}
+
+fn decompress_gz_static(raw: &[u8]) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut dec = flate2::read::GzDecoder::new(raw);
+    let mut out = Vec::with_capacity(raw.len() * 2);
+    dec.read_to_end(&mut out).ok()?;
+    Some(out)
+}
+
+/// Read every `.ttf`/`.otf`/`.ttf.gz`/`.otf.gz` the search finds. Duplicate file names keep the
 /// first hit, so an installed bundle is never mixed with the dev tree.
 pub fn collect() -> Vec<Face> {
     let mut faces: Vec<Face> = Vec::new();
@@ -70,30 +94,31 @@ pub fn collect() -> Vec<Face> {
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            let ext = path
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(str::to_ascii_lowercase);
-            if !matches!(ext.as_deref(), Some("ttf") | Some("otf")) {
-                continue;
-            }
             let Some(name) = path.file_name().and_then(|n| n.to_str()).map(str::to_string)
             else {
                 continue;
             };
-            if !seen.insert(name.clone()) {
+            let lower = name.to_ascii_lowercase();
+            let is_font = lower.ends_with(".ttf")
+                || lower.ends_with(".otf")
+                || lower.ends_with(".ttf.gz")
+                || lower.ends_with(".otf.gz");
+            if !is_font {
                 continue;
             }
-            // Pretendard.ttf and PretendardVariable.ttf are both 6.7 MB variable
-            // faces for the same family; loading only one saves ~6.7 MB RAM.
-            let lower = name.to_ascii_lowercase();
-            if lower == "pretendardvariable.ttf" && seen.contains("Pretendard.ttf")
-                || lower == "pretendard.ttf" && seen.contains("PretendardVariable.ttf")
+            let dedup_key = lower.strip_suffix(".gz").unwrap_or(&lower).to_string();
+            if !seen.insert(dedup_key) {
+                continue;
+            }
+            if lower.starts_with("pretendardvariable.") && seen.contains("pretendard.ttf")
+                || lower.starts_with("pretendard.") && seen.contains("pretendardvariable.ttf")
             {
                 continue;
             }
-            if let Ok(bytes) = std::fs::read(&path) {
-                faces.push(Face { path, bytes });
+            if let Ok(raw) = std::fs::read(&path) {
+                if let Some(bytes) = decode_font_bytes(&path, raw) {
+                    faces.push(Face { path, bytes });
+                }
             }
         }
     }
@@ -108,14 +133,20 @@ pub fn collect() -> Vec<Face> {
 pub fn register(
     text_system: &std::sync::Arc<gpui_kit::TextSystem>,
 ) -> anyhow::Result<Registration> {
-    const EMBEDDED_PRETENDARD: &[u8] =
-        include_bytes!("../../../../assets/fonts/Pretendard.ttf");
+    const EMBEDDED_PRETENDARD_GZ: &[u8] =
+        include_bytes!("../../../../assets/fonts/Pretendard.ttf.gz");
+    const EMBEDDED_QINFENG_GZ: &[u8] =
+        include_bytes!("../../../../assets/fonts/QynFlavorGroteskCHS-Medium.ttf.gz");
 
     let before: BTreeSet<String> = text_system.all_font_names().into_iter().collect();
     let faces = collect();
     let payload: Vec<std::borrow::Cow<'static, [u8]>> = if faces.is_empty() {
-        log::info!("no on-disk fonts beside the executable; using embedded Pretendard face");
-        vec![std::borrow::Cow::Borrowed(EMBEDDED_PRETENDARD)]
+        log::info!("no on-disk fonts beside the executable; using embedded Pretendard + Qinfeng Hei CHS faces");
+        [EMBEDDED_PRETENDARD_GZ, EMBEDDED_QINFENG_GZ]
+            .into_iter()
+            .filter_map(decompress_gz_static)
+            .map(std::borrow::Cow::Owned)
+            .collect()
     } else {
         faces
             .into_iter()

@@ -382,6 +382,96 @@ pub fn paint_row_with_shadow(
     }
 }
 
+/// Builds per-frame `RowLight` (base/dark/bright + word-sweep mask + scaled glow)
+/// for a shaped lyric row, shared by main window and desktop lyrics.
+pub fn build_row_light(
+    row: &super::model::Row,
+    shaped: &RowLines,
+    pos_ms: f64,
+    is_active: bool,
+    dim: f32,
+    display: &super::model::Display,
+) -> RowLight {
+    let light = super::model::row_light(row, pos_ms, is_active, false, display);
+    let progress = line_progress(pos_ms, row.start_ms, row.duration_ms());
+    let mask = if is_active && light.sweep.is_some() {
+        Some(
+            shaped
+                .masks
+                .iter()
+                .map(|frames| oly_render::mask::position_at(frames, progress))
+                .collect(),
+        )
+    } else {
+        None
+    };
+    let glow = if is_active {
+        light.glow.map(|mut g| {
+            for v in &mut g {
+                *v *= dim;
+            }
+            g
+        })
+    } else {
+        None
+    };
+    RowLight {
+        base: (light.dark * dim).clamp(0.0, 1.0),
+        dark: (light.dark * dim).clamp(0.0, 1.0),
+        bright: (light.bright * dim).clamp(0.0, 1.0),
+        mask,
+        glow,
+    }
+}
+
+/// Paints the 3-dot interlude indicator centred at `(cx_pos, cy_pos)`.
+/// Shared by both the main player lyric column and horizontal/vertical desktop lyrics.
+#[allow(clippy::too_many_arguments)]
+pub fn paint_interlude_strip(
+    window: &mut Window,
+    cx_pos: f32,
+    cy_pos: f32,
+    d: f32,
+    g: f32,
+    dot_opacities: [f32; 3],
+    opacity: f32,
+    vertical: bool,
+    color_rgb: Option<u32>,
+    shadow_rgb: Option<(u32, f32)>,
+) {
+    if d <= 0.0 || opacity <= 0.001 {
+        return;
+    }
+    let span = d * 3.0 + g * 2.0;
+    for i in 0..3 {
+        let a = (opacity * dot_opacities[i]).clamp(0.0, 1.0);
+        if a <= 0.001 {
+            continue;
+        }
+        let (dx, dy) = if vertical {
+            (cx_pos - d * 0.5, cy_pos - span * 0.5 + i as f32 * (d + g))
+        } else {
+            (cx_pos - span * 0.5 + i as f32 * (d + g), cy_pos - d * 0.5)
+        };
+        if let Some((s_rgb, s_dy)) = shadow_rgb {
+            super::chrome::fill_round_subpixel(
+                window,
+                dx,
+                dy + s_dy,
+                d,
+                d,
+                d * 0.5,
+                Hsla::from(gpui_kit::rgb(s_rgb)).opacity(0.55 * a),
+            );
+        }
+        let fill = match color_rgb {
+            Some(rgb) => Hsla::from(gpui_kit::rgb(rgb)).opacity(a),
+            None => super::chrome::text(a),
+        };
+        super::chrome::fill_round_subpixel(window, dx, dy, d, d, d * 0.5, fill);
+    }
+}
+
 /// Translation uses the same pixel feather as the original, with its own opacity.
 pub fn paint_translation(window: &mut Window, layout: &gpui_kit::LineLayout, x: f32, y: f32, font_size: f32, alpha: f32, clip: [f32; 3], line_scale: f32, pivot_x: f32, pivot_y: f32, wrapper: WrapperTransform, blur: f32) {
     let sf = window.scale_factor();

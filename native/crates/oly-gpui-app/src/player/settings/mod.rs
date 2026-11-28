@@ -200,12 +200,11 @@ impl Settings {
             if let Some(pos) = rows.iter().position(|item| item.key == "beatFollow") {
                 static DISPLAY_OPTS: &[(&str, &str)] = &[
                     ("primary", "主显示器"),
-                    ("all", "全部屏幕"),
                     ("display:0", "显示器 1"),
                     ("display:1", "显示器 2"),
                     ("display:2", "显示器 3"),
                 ];
-                let limit = (2 + self.display_count).min(DISPLAY_OPTS.len());
+                let limit = (1 + self.display_count).min(DISPLAY_OPTS.len());
                 rows.insert(
                     pos + 1,
                     choice("window.wallpaperDisplay", "壁纸显示屏幕", &DISPLAY_OPTS[..limit]),
@@ -235,17 +234,10 @@ impl Settings {
                     ),
                 );
                 insert_at += 1;
-                if has_custom_dir {
-                    rows.insert(
-                        insert_at,
-                        action("action.clearCustomLyricsDir", "清除扫描目录", "清除", false),
-                    );
-                    insert_at += 1;
-                }
                 if self.has_local_lyrics {
                     rows.insert(
                         insert_at,
-                        action("action.openCustomLyricsDir", "本地歌词保存路径", "打开目录", false),
+                        action("action.openCustomLyricsDir", "导入歌词保存路径", "打开目录", false),
                     );
                 }
             }

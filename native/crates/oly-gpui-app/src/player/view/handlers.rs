@@ -53,7 +53,7 @@ impl PlayerView {
             return ("已在浏览器中打开开源仓库".into(), None);
         }
         if action == "action.toggleWallpaperMode" {
-            if !self.wallpaper_windows.is_empty() {
+            if self.wallpaper_mode {
                 self.pending_wallpaper_exit = true;
                 return ("正在退出桌面壁纸模式…".into(), None);
             } else {
@@ -92,7 +92,7 @@ impl PlayerView {
                 {
                     let _ = std::process::Command::new("explorer.exe").arg(&dir).spawn();
                 }
-                ("已打开本地歌词保存目录".into(), None)
+                ("已打开导入歌词保存目录".into(), None)
             }
             "action.clearLyricsCache" => {
                 let n = live.clear_lyrics_cache();
@@ -464,6 +464,11 @@ impl PlayerView {
                 }
                 Some(Hot::SettingChoice(row_i)) => {
                     if let Some(item) = self.settings.items().get(row_i as usize).copied() {
+                        if item.key == "action.pickCustomLyricsDir" {
+                            let (msg, _) = self.execute_settings_action("action.clearCustomLyricsDir");
+                            self.settings.status = msg;
+                            return;
+                        }
                         if let crate::player::settings::Control::AliasRow(alias_idx) = item.control {
                             if let Some((from, _)) = self.settings.artist_aliases().get(alias_idx).cloned() {
                                 self.settings.remove_artist_alias(&from, self.now_ms());
@@ -480,15 +485,21 @@ impl PlayerView {
                 }
                 _ => {
                     if let Some(pr) = self.panel_bounds.last().copied() {
-                        if let Some((row_i, _, _)) = self
+                        if let Some((row_i, item, _)) = self
                             .settings
                             .rows(pr)
                             .into_iter()
                             .find(|(_, item, row)| {
-                                matches!(item.control, crate::player::settings::Control::PlayerOffset(_))
+                                (matches!(item.control, crate::player::settings::Control::PlayerOffset(_))
+                                    || item.key == "action.pickCustomLyricsDir")
                                     && row.contains(x, y)
                             })
                         {
+                            if item.key == "action.pickCustomLyricsDir" {
+                                let (msg, _) = self.execute_settings_action("action.clearCustomLyricsDir");
+                                self.settings.status = msg;
+                                return;
+                            }
                             if self.settings.remove_player_offset(row_i, self.now_ms()).is_some() {
                                 self.sync_profile_display();
                                 return;
@@ -1103,7 +1114,7 @@ impl PlayerView {
                     self.tool.set_more_open(false);
                     self.picker_open = false;
                 } else if Some(i) == wallpaper_idx {
-                    if !self.wallpaper_windows.is_empty() {
+                    if self.wallpaper_mode {
                         self.pending_wallpaper_exit = true;
                     } else {
                         self.pending_wallpaper_enter = true;

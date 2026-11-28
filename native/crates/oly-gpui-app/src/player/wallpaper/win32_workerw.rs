@@ -110,6 +110,46 @@ unsafe fn find_workerw() -> Option<(windows::Win32::Foundation::HWND, Option<win
     Some((progman, None))
 }
 
+/// Saved Win32 style and physical screen rect captured before attaching the
+/// main window into `WorkerW`, so exiting wallpaper mode restores it cleanly.
+#[derive(Clone, Copy, Debug)]
+pub struct SavedWindowState {
+    pub style: i32,
+    pub ex_style: i32,
+    pub rect: (i32, i32, i32, i32),
+}
+
+/// Captures `hwnd`'s current Win32 style, extended style, and physical screen rect.
+pub fn capture_window_state(hwnd: isize) -> Option<SavedWindowState> {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        use windows::Win32::Foundation::{HWND, RECT};
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GWL_EXSTYLE, GWL_STYLE, GetWindowLongW, GetWindowRect,
+        };
+        if hwnd == 0 {
+            return None;
+        }
+        let h = HWND(hwnd as *mut core::ffi::c_void);
+        let style = GetWindowLongW(h, GWL_STYLE);
+        let ex_style = GetWindowLongW(h, GWL_EXSTYLE);
+        let mut r = RECT::default();
+        if GetWindowRect(h, &mut r).is_err() {
+            return None;
+        }
+        Some(SavedWindowState {
+            style,
+            ex_style,
+            rect: (r.left, r.top, (r.right - r.left).max(1), (r.bottom - r.top).max(1)),
+        })
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = hwnd;
+        None
+    }
+}
+
 /// Attaches `hwnd` under the desktop `WorkerW` layer at physical screen rect `(x, y, w, h)`.
 pub fn attach_to_workerw(hwnd: isize, x_phys: i32, y_phys: i32, w_phys: i32, h_phys: i32) -> bool {
     #[cfg(target_os = "windows")]
@@ -183,8 +223,13 @@ pub fn attach_to_workerw(hwnd: isize, x_phys: i32, y_phys: i32, w_phys: i32, h_p
     }
 }
 
-/// Detaches `hwnd` from `WorkerW`, hides it, and forces Explorer to repaint the original wallpaper.
-pub fn detach_from_workerw_and_refresh(hwnd: isize) {
+/// Detaches `hwnd` from `WorkerW`, restores its saved Win32 style/rect if provided,
+/// and forces Explorer to repaint the original wallpaper.
+pub fn detach_from_workerw_and_refresh(
+    hwnd: isize,
+    saved: Option<SavedWindowState>,
+    show_visible: bool,
+) {
     #[cfg(target_os = "windows")]
     unsafe {
         use windows::Win32::Foundation::HWND;
@@ -192,7 +237,8 @@ pub fn detach_from_workerw_and_refresh(hwnd: isize) {
             RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE, RDW_UPDATENOW, RedrawWindow,
         };
         use windows::Win32::UI::WindowsAndMessaging::{
-            FindWindowW, SW_HIDE, SetParent, ShowWindow,
+            FindWindowW, GWL_EXSTYLE, GWL_STYLE, HWND_NOTOPMOST, SW_HIDE, SW_SHOW,
+            SWP_FRAMECHANGED, SWP_NOACTIVATE, SetParent, SetWindowLongW, SetWindowPos, ShowWindow,
         };
         use windows::core::w;
 
@@ -200,6 +246,23 @@ pub fn detach_from_workerw_and_refresh(hwnd: isize) {
             let h = HWND(hwnd as *mut core::ffi::c_void);
             let _ = ShowWindow(h, SW_HIDE);
             let _ = SetParent(h, None);
+            if let Some(st) = saved {
+                let _ = SetWindowLongW(h, GWL_STYLE, st.style);
+                let _ = SetWindowLongW(h, GWL_EXSTYLE, st.ex_style);
+                let (x, y, w, h_px) = st.rect;
+                let _ = SetWindowPos(
+                    h,
+                    Some(HWND_NOTOPMOST),
+                    x,
+                    y,
+                    w.max(1),
+                    h_px.max(1),
+                    SWP_FRAMECHANGED | SWP_NOACTIVATE,
+                );
+            }
+            if show_visible {
+                let _ = ShowWindow(h, SW_SHOW);
+            }
         }
         if let Some((workerw, _)) = find_workerw() {
             let _ = RedrawWindow(
@@ -221,7 +284,7 @@ pub fn detach_from_workerw_and_refresh(hwnd: isize) {
         }
     }
     #[cfg(not(target_os = "windows"))]
-    let _ = hwnd;
+    let _ = (hwnd, saved, show_visible);
 }
 
 /// Returns `true` when the desktop is locked / on a secure desktop, OR when a visible
